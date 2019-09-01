@@ -3,13 +3,11 @@ use std::convert::TryInto;
 use bytes::{Bytes, BytesMut};
 use tokio::codec::Decoder;
 
-type AmpBox = Vec<(Bytes, Bytes)>;
-
 #[derive(Debug, Default, PartialEq)]
-pub struct AmpCodec {
+pub struct AmpCodec<D = Vec<(Bytes, Bytes)>> {
     state: State,
     key: Bytes,
-    frame: AmpBox,
+    frame: D,
 }
 
 #[derive(Debug, PartialEq)]
@@ -24,7 +22,10 @@ impl Default for State {
     }
 }
 
-impl AmpCodec {
+impl<D> AmpCodec<D>
+where
+    D: Default,
+{
     pub fn new() -> Self {
         Default::default()
     }
@@ -49,9 +50,12 @@ impl AmpCodec {
 
 const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 
-impl Decoder for AmpCodec {
+impl<D> Decoder for AmpCodec<D>
+where
+    D: Default + Extend<(Bytes, Bytes)>,
+{
     type Error = AmpError;
-    type Item = AmpBox;
+    type Item = D;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         loop {
@@ -66,7 +70,7 @@ impl Decoder for AmpCodec {
                 State::Key => {
                     if length == 0 {
                         buf.split_to(LENGTH_SIZE);
-                        return Ok(Some(std::mem::replace(&mut self.frame, Vec::new())));
+                        return Ok(Some(std::mem::replace(&mut self.frame, Default::default())));
                     } else {
                         match Self::read_key(length, buf)? {
                             Some(key) => {
@@ -82,7 +86,7 @@ impl Decoder for AmpCodec {
                 State::Value => match Self::read_delimited(length, buf) {
                     Some(value) => {
                         let key = std::mem::replace(&mut self.key, Bytes::new());
-                        self.frame.push((key, value));
+                        self.frame.extend(std::iter::once((key, value)));
                         self.state = State::Key;
                     }
                     None => {
@@ -126,7 +130,7 @@ mod test {
 
     #[test]
     fn www_example() {
-        let mut codec = AmpCodec::new();
+        let mut codec = AmpCodec::<Vec<_>>::new();
         let mut buf = BytesMut::new();
         buf.extend(WWW_EXAMPLE);
 
