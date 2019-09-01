@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
-use bytes::{Bytes, BytesMut};
-use tokio::codec::Decoder;
+use bytes::{BufMut, Bytes, BytesMut};
+use tokio::codec::{Decoder, Encoder};
 
 #[derive(Debug, Default, PartialEq)]
 pub struct AmpCodec<D = Vec<(Bytes, Bytes)>> {
@@ -31,7 +31,7 @@ where
     }
 
     fn read_key(length: usize, buf: &mut BytesMut) -> Result<Option<Bytes>, AmpError> {
-        if length >= 256 {
+        if length > 255 {
             return Err(AmpError::KeyTooLong);
         }
 
@@ -98,10 +98,49 @@ where
     }
 }
 
+impl<D, K, V> Encoder for AmpCodec<D>
+where
+    D: IntoIterator<Item = (K, V)>,
+    K: AsRef<[u8]>,
+    V: AsRef<[u8]>,
+{
+    type Error = AmpError;
+    type Item = D;
+
+    fn encode(&mut self, item: D, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        for (key, value) in item {
+            let key = key.as_ref();
+            let value = value.as_ref();
+
+            if key.is_empty() {
+                return Err(AmpError::EmptyKey);
+            }
+            if key.len() > 255 {
+                return Err(AmpError::KeyTooLong);
+            }
+            if value.len() > 0xffff {
+                return Err(AmpError::ValueTooLong);
+            }
+
+            dst.reserve(LENGTH_SIZE * 2 + key.len() + value.len());
+            dst.put_u16_be(key.len().try_into().unwrap());
+            dst.extend(key);
+            dst.put_u16_be(value.len().try_into().unwrap());
+            dst.extend(value);
+        }
+        dst.reserve(LENGTH_SIZE);
+        dst.put_u16_be(0);
+
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum AmpError {
     IO(std::io::Error),
     KeyTooLong,
+    EmptyKey,
+    ValueTooLong,
 }
 
 impl From<std::io::Error> for AmpError {
@@ -114,7 +153,7 @@ impl From<std::io::Error> for AmpError {
 mod test {
     use crate::*;
     use bytes::BytesMut;
-    use tokio::codec::Decoder;
+    use tokio::codec::{Decoder, Encoder};
 
     const WWW_EXAMPLE: &[u8] = &[
         0x00, 0x04, 0x5F, 0x61, 0x73, 0x6B, 0x00, 0x02, 0x32, 0x33, 0x00, 0x08, 0x5F, 0x63, 0x6F,
@@ -129,12 +168,13 @@ mod test {
     ];
 
     #[test]
-    fn www_example() {
+    fn decode_example() {
         let mut codec = AmpCodec::<Vec<_>>::new();
         let mut buf = BytesMut::new();
         buf.extend(WWW_EXAMPLE);
 
         let frame = codec.decode(&mut buf).unwrap().unwrap();
+
         assert_eq!(
             frame
                 .iter()
@@ -144,5 +184,14 @@ mod test {
         );
         assert_eq!(buf.len(), 0);
         assert_eq!(codec, AmpCodec::new());
+    }
+
+    #[test]
+    fn encode_example() {
+        let mut codec = AmpCodec::new();
+        let mut buf = BytesMut::new();
+
+        codec.encode(WWW_EXAMPLE_DEC.to_vec(), &mut buf).unwrap();
+        assert_eq!(buf, WWW_EXAMPLE);
     }
 }
