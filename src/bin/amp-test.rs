@@ -151,6 +151,7 @@ enum DispatchMsg {
     Frame(Frame),
     Request(Bytes, RawFrame, oneshot::Sender<Response>),
     Reply(Bytes, Response),
+    Exit,
 }
 
 #[derive(Debug)]
@@ -282,6 +283,7 @@ where
         }
     }
 
+    write_tx.send(DispatchMsg::Exit).await?;
     Ok(())
 }
 
@@ -323,6 +325,7 @@ where
                 let reply_tx = reply_map.remove(&tag).ok_or(Error::UnmatchedReply)?;
                 reply_tx.send(response).unwrap();
             }
+            DispatchMsg::Exit => break,
         }
     }
 
