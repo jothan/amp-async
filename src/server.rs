@@ -17,7 +17,7 @@ pub struct Request(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
 #[derive(Debug)]
 enum DispatchMsg {
     Frame(Frame),
-    Request(Bytes, RawFrame, oneshot::Sender<Response>),
+    Request(Bytes, RawFrame, Option<oneshot::Sender<Response>>),
     Reply(Bytes, Response),
     Exit,
 }
@@ -85,11 +85,22 @@ impl RequestSender {
     ) -> Result<Response, Box<dyn std::error::Error>> {
         let (tx, rx) = oneshot::channel();
         self.0
-            .send(DispatchMsg::Request(command, fields, tx))
+            .send(DispatchMsg::Request(command, fields, Some(tx)))
             .await?;
-        let res = rx.await?;
 
-        Ok(res)
+        Ok(rx.await?)
+    }
+
+    pub async fn call_remote_noreply(
+        &mut self,
+        command: Bytes,
+        fields: RawFrame,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.0
+            .send(DispatchMsg::Request(command, fields, None))
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -172,16 +183,19 @@ where
                 output.send(frame).await?;
             }
             DispatchMsg::Request(command, fields, reply) => {
-                seqno += 1;
-                seqno_str.clear();
-                write!(seqno_str, "{:x}", seqno).unwrap();
+                let tag = reply.map(|reply| {
+                    seqno += 1;
+                    seqno_str.clear();
+                    write!(seqno_str, "{:x}", seqno).unwrap();
 
-                let seq_str: Bytes = seqno_str.as_bytes().into();
-                reply_map.insert(seq_str.clone(), reply);
+                    let seq_str: Bytes = seqno_str.as_bytes().into();
+                    reply_map.insert(seq_str.clone(), reply);
+                    seq_str
+                });
 
                 let frame = Frame::Request {
                     command,
-                    tag: Some(seq_str),
+                    tag,
                     fields,
                 };
                 output.send(frame.into()).await?;
