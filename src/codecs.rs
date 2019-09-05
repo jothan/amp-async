@@ -149,6 +149,14 @@ impl From<std::io::Error> for AmpError {
     }
 }
 
+impl std::fmt::Display for AmpError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        write!(fmt, "{:?}", self)
+    }
+}
+
+impl std::error::Error for AmpError {}
+
 #[cfg(test)]
 mod test {
     use crate::*;
