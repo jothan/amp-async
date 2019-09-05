@@ -3,6 +3,7 @@ pub enum Error {
     ConfusedFrame,
     IncompleteErrorFrame,
     UnmatchedReply,
+    SendError,
 }
 
 impl std::fmt::Display for Error {

@@ -34,7 +34,7 @@ impl ReplyTicket {
         self.sent = true;
         self.write_handle
             .send(DispatchMsg::Frame(Frame::Response {
-                tag: self.tag.clone(),
+                tag: self.tag.split_off(0),
                 response: Ok(reply),
             }))
             .await?;
@@ -48,7 +48,7 @@ impl ReplyTicket {
         description: Option<Bytes>,
     ) -> Result<(), mpsc::error::SendError> {
         self.sent = true;
-        let frame = Frame::error(self.tag.clone(), code, description);
+        let frame = Frame::error(self.tag.split_off(0), code, description);
         self.write_handle.send(DispatchMsg::Frame(frame)).await?;
 
         Ok(())
@@ -202,7 +202,7 @@ where
             }
             DispatchMsg::Reply(tag, response) => {
                 let reply_tx = reply_map.remove(&tag).ok_or(Error::UnmatchedReply)?;
-                reply_tx.send(response).unwrap();
+                reply_tx.send(response).map_err(|_| Error::SendError)?;
             }
             DispatchMsg::Exit => input.close(),
         }
