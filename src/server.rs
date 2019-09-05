@@ -204,7 +204,7 @@ where
                 let reply_tx = reply_map.remove(&tag).ok_or(Error::UnmatchedReply)?;
                 reply_tx.send(response).unwrap();
             }
-            DispatchMsg::Exit => break,
+            DispatchMsg::Exit => input.close(),
         }
     }
 
