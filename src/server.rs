@@ -55,6 +55,25 @@ impl ReplyTicket {
     }
 }
 
+impl Drop for ReplyTicket {
+    fn drop(&mut self) {
+        if !self.sent {
+            let mut write_handle = self.write_handle.clone();
+            let frame = Frame::error(
+                self.tag.split_off(0),
+                None,
+                Some("Request dropped without reply".into()),
+            );
+            tokio::spawn(async move {
+                write_handle
+                    .send(DispatchMsg::Frame(frame))
+                    .await
+                    .expect("error on drop")
+            });
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RequestSender(mpsc::Sender<DispatchMsg>);
 
@@ -71,25 +90,6 @@ impl RequestSender {
         let res = rx.await?;
 
         Ok(res)
-    }
-}
-
-impl Drop for ReplyTicket {
-    fn drop(&mut self) {
-        if !self.sent {
-            let mut write_handle = self.write_handle.clone();
-            let frame = Frame::error(
-                self.tag.clone(),
-                None,
-                Some("Request dropped without reply".into()),
-            );
-            tokio::spawn(async move {
-                write_handle
-                    .send(DispatchMsg::Frame(frame))
-                    .await
-                    .expect("error on drop")
-            });
-        }
     }
 }
 
@@ -161,7 +161,7 @@ where
 {
     let codec_out: AmpCodec<RawFrame> = AmpCodec::new();
     let mut output = FramedWrite::new(output, codec_out);
-    let mut seqno: u64 = 1;
+    let mut seqno: u64 = 0;
     let mut seqno_str = String::with_capacity(10);
     let mut reply_map = HashMap::new();
 
