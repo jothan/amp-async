@@ -82,7 +82,7 @@ impl RequestSender {
         &mut self,
         command: Bytes,
         fields: RawFrame,
-    ) -> Result<Response, Box<dyn std::error::Error>> {
+    ) -> Result<Response, Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .send(WriteCmd::Request(command, fields, Some(tx)))
@@ -95,7 +95,7 @@ impl RequestSender {
         &mut self,
         command: Bytes,
         fields: RawFrame,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Error> {
         self.0
             .send(WriteCmd::Request(command, fields, None))
             .await?;
@@ -130,7 +130,7 @@ async fn read_loop<R>(
     input: R,
     mut write_tx: mpsc::Sender<WriteCmd>,
     mut dispatch_tx: mpsc::Sender<Request>,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<(), Error>
 where
     R: AsyncRead + Unpin,
 {
@@ -166,7 +166,7 @@ where
 async fn write_loop<W>(
     output: W,
     mut input: mpsc::Receiver<WriteCmd>,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<(), Error>
 where
     W: AsyncWrite + Unpin,
 {
