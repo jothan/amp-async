@@ -15,7 +15,7 @@ use crate::{Codec, Error, Frame, RawFrame};
 pub struct Request(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
 
 #[derive(Debug)]
-enum DispatchMsg {
+enum WriteCmd {
     Frame(Frame),
     Request(Bytes, RawFrame, Option<oneshot::Sender<Response>>),
     Reply(Bytes, Response),
@@ -25,7 +25,7 @@ enum DispatchMsg {
 #[derive(Debug)]
 pub struct ReplyTicket {
     tag: Bytes,
-    write_handle: mpsc::Sender<DispatchMsg>,
+    write_handle: mpsc::Sender<WriteCmd>,
     sent: bool,
 }
 
@@ -33,7 +33,7 @@ impl ReplyTicket {
     pub async fn ok(mut self, reply: RawFrame) -> Result<(), mpsc::error::SendError> {
         self.sent = true;
         self.write_handle
-            .send(DispatchMsg::Frame(Frame::Response {
+            .send(WriteCmd::Frame(Frame::Response {
                 tag: self.tag.split_off(0),
                 response: Ok(reply),
             }))
@@ -49,7 +49,7 @@ impl ReplyTicket {
     ) -> Result<(), mpsc::error::SendError> {
         self.sent = true;
         let frame = Frame::error(self.tag.split_off(0), code, description);
-        self.write_handle.send(DispatchMsg::Frame(frame)).await?;
+        self.write_handle.send(WriteCmd::Frame(frame)).await?;
 
         Ok(())
     }
@@ -66,7 +66,7 @@ impl Drop for ReplyTicket {
             );
             tokio::spawn(async move {
                 write_handle
-                    .send(DispatchMsg::Frame(frame))
+                    .send(WriteCmd::Frame(frame))
                     .await
                     .expect("error on drop")
             });
@@ -75,7 +75,7 @@ impl Drop for ReplyTicket {
 }
 
 #[derive(Clone)]
-pub struct RequestSender(mpsc::Sender<DispatchMsg>);
+pub struct RequestSender(mpsc::Sender<WriteCmd>);
 
 impl RequestSender {
     pub async fn call_remote(
@@ -85,7 +85,7 @@ impl RequestSender {
     ) -> Result<Response, Box<dyn std::error::Error>> {
         let (tx, rx) = oneshot::channel();
         self.0
-            .send(DispatchMsg::Request(command, fields, Some(tx)))
+            .send(WriteCmd::Request(command, fields, Some(tx)))
             .await?;
 
         Ok(rx.await?)
@@ -97,7 +97,7 @@ impl RequestSender {
         fields: RawFrame,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.0
-            .send(DispatchMsg::Request(command, fields, None))
+            .send(WriteCmd::Request(command, fields, None))
             .await?;
 
         Ok(())
@@ -109,7 +109,7 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let (write_tx, write_rx) = mpsc::channel::<DispatchMsg>(32);
+    let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(32);
     let write_tx2 = write_tx.clone();
     let (dispatch_tx, dispatch_rx) = mpsc::channel::<Request>(32);
     tokio::spawn(async move {
@@ -128,7 +128,7 @@ where
 
 async fn read_loop<R>(
     input: R,
-    mut write_tx: mpsc::Sender<DispatchMsg>,
+    mut write_tx: mpsc::Sender<WriteCmd>,
     mut dispatch_tx: mpsc::Sender<Request>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -154,18 +154,18 @@ where
             }
 
             Frame::Response { tag, response } => {
-                write_tx.send(DispatchMsg::Reply(tag, response)).await?;
+                write_tx.send(WriteCmd::Reply(tag, response)).await?;
             }
         }
     }
 
-    write_tx.send(DispatchMsg::Exit).await?;
+    write_tx.send(WriteCmd::Exit).await?;
     Ok(())
 }
 
 async fn write_loop<W>(
     output: W,
-    mut input: mpsc::Receiver<DispatchMsg>,
+    mut input: mpsc::Receiver<WriteCmd>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     W: AsyncWrite + Unpin,
@@ -178,11 +178,11 @@ where
 
     while let Some(msg) = input.next().await {
         match msg {
-            DispatchMsg::Frame(frame) => {
+            WriteCmd::Frame(frame) => {
                 let frame = frame.into();
                 output.send(frame).await?;
             }
-            DispatchMsg::Request(command, fields, reply) => {
+            WriteCmd::Request(command, fields, reply) => {
                 let tag = reply.map(|reply| {
                     seqno += 1;
                     seqno_str.clear();
@@ -200,11 +200,11 @@ where
                 };
                 output.send(frame.into()).await?;
             }
-            DispatchMsg::Reply(tag, response) => {
+            WriteCmd::Reply(tag, response) => {
                 let reply_tx = reply_map.remove(&tag).ok_or(Error::UnmatchedReply)?;
                 reply_tx.send(response).map_err(|_| Error::SendError)?;
             }
-            DispatchMsg::Exit => input.close(),
+            WriteCmd::Exit => input.close(),
         }
     }
 
