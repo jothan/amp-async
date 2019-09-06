@@ -9,7 +9,7 @@ use tokio::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::frame::Response;
-use crate::{AmpCodec, Error, Frame, RawFrame};
+use crate::{Codec, Error, Frame, RawFrame};
 
 #[derive(Debug)]
 pub struct Request(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
@@ -134,7 +134,7 @@ async fn read_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let codec_in: AmpCodec<RawFrame> = AmpCodec::new();
+    let codec_in: Codec<RawFrame> = Codec::new();
     let mut input = FramedRead::new(input, codec_in);
 
     while let Some(frame) = input.try_next().await? {
@@ -170,7 +170,7 @@ async fn write_loop<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let codec_out: AmpCodec<RawFrame> = AmpCodec::new();
+    let codec_out: Codec<RawFrame> = Codec::new();
     let mut output = FramedWrite::new(output, codec_out);
     let mut seqno: u64 = 0;
     let mut seqno_str = String::with_capacity(10);

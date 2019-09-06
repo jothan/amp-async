@@ -4,7 +4,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use tokio::codec::{Decoder, Encoder};
 
 #[derive(Debug, Default, PartialEq)]
-pub struct AmpCodec<D = Vec<(Bytes, Bytes)>> {
+pub struct Codec<D = Vec<(Bytes, Bytes)>> {
     state: State,
     key: Bytes,
     frame: D,
@@ -22,7 +22,7 @@ impl Default for State {
     }
 }
 
-impl<D> AmpCodec<D>
+impl<D> Codec<D>
 where
     D: Default,
 {
@@ -30,9 +30,9 @@ where
         Default::default()
     }
 
-    fn read_key(length: usize, buf: &mut BytesMut) -> Result<Option<Bytes>, AmpError> {
+    fn read_key(length: usize, buf: &mut BytesMut) -> Result<Option<Bytes>, CodecError> {
         if length > 255 {
-            return Err(AmpError::KeyTooLong);
+            return Err(CodecError::KeyTooLong);
         }
 
         Ok(Self::read_delimited(length, buf))
@@ -50,11 +50,11 @@ where
 
 const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 
-impl<D> Decoder for AmpCodec<D>
+impl<D> Decoder for Codec<D>
 where
     D: Default + Extend<(Bytes, Bytes)>,
 {
-    type Error = AmpError;
+    type Error = CodecError;
     type Item = D;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -98,13 +98,13 @@ where
     }
 }
 
-impl<D, K, V> Encoder for AmpCodec<D>
+impl<D, K, V> Encoder for Codec<D>
 where
     D: IntoIterator<Item = (K, V)>,
     K: AsRef<[u8]>,
     V: AsRef<[u8]>,
 {
-    type Error = AmpError;
+    type Error = CodecError;
     type Item = D;
 
     fn encode(&mut self, item: D, dst: &mut BytesMut) -> Result<(), Self::Error> {
@@ -113,13 +113,13 @@ where
             let value = value.as_ref();
 
             if key.is_empty() {
-                return Err(AmpError::EmptyKey);
+                return Err(CodecError::EmptyKey);
             }
             if key.len() > 255 {
-                return Err(AmpError::KeyTooLong);
+                return Err(CodecError::KeyTooLong);
             }
             if value.len() > 0xffff {
-                return Err(AmpError::ValueTooLong);
+                return Err(CodecError::ValueTooLong);
             }
 
             dst.reserve(LENGTH_SIZE * 2 + key.len() + value.len());
@@ -136,26 +136,26 @@ where
 }
 
 #[derive(Debug)]
-pub enum AmpError {
+pub enum CodecError {
     IO(std::io::Error),
     KeyTooLong,
     EmptyKey,
     ValueTooLong,
 }
 
-impl From<std::io::Error> for AmpError {
+impl From<std::io::Error> for CodecError {
     fn from(err: std::io::Error) -> Self {
         Self::IO(err)
     }
 }
 
-impl std::fmt::Display for AmpError {
+impl std::fmt::Display for CodecError {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         write!(fmt, "{:?}", self)
     }
 }
 
-impl std::error::Error for AmpError {}
+impl std::error::Error for CodecError {}
 
 #[cfg(test)]
 mod test {
@@ -177,7 +177,7 @@ mod test {
 
     #[test]
     fn decode_example() {
-        let mut codec = AmpCodec::<Vec<_>>::new();
+        let mut codec = Codec::<Vec<_>>::new();
         let mut buf = BytesMut::new();
         buf.extend(WWW_EXAMPLE);
 
@@ -191,12 +191,12 @@ mod test {
             WWW_EXAMPLE_DEC
         );
         assert_eq!(buf.len(), 0);
-        assert_eq!(codec, AmpCodec::new());
+        assert_eq!(codec, Codec::new());
     }
 
     #[test]
     fn encode_example() {
-        let mut codec = AmpCodec::new();
+        let mut codec = Codec::new();
         let mut buf = BytesMut::new();
 
         codec.encode(WWW_EXAMPLE_DEC.to_vec(), &mut buf).unwrap();
