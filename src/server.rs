@@ -3,11 +3,13 @@ use std::convert::TryInto;
 use std::fmt::Write;
 
 use bytes::Bytes;
-use futures_util::try_stream::TryStreamExt;
+use futures_util::future::select;
+use futures_util::future::Either;
 use tokio::codec::{FramedRead, FramedWrite};
 use tokio::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::codecs::CodecError;
 use crate::frame::Response;
 use crate::{Codec, Error, Frame, RawFrame};
 
@@ -104,7 +106,34 @@ impl RequestSender {
     }
 }
 
-pub fn serve<R, W>(input: R, output: W) -> (RequestSender, mpsc::Receiver<Request>)
+pub struct Handle {
+    write_res: oneshot::Receiver<Result<(), Error>>,
+    read_res: oneshot::Receiver<Result<(), Error>>,
+    write_loop_handle: mpsc::Sender<WriteCmd>,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl Handle {
+    pub fn shutdown(&mut self) -> Result<(), Error> {
+        if let Some(s) = self.shutdown.take() {
+            // Read loop might already be shutdown.
+            s.send(()).map_err(|_| Error::SendError)?;
+        }
+        Ok(())
+    }
+
+    pub async fn join(mut self) -> Result<(), Error> {
+        let _ = (&mut self.write_res).await?;
+        let _ = (&mut self.read_res).await?;
+        Ok(())
+    }
+
+    pub fn request_sender(&self) -> RequestSender {
+        RequestSender(self.write_loop_handle.clone())
+    }
+}
+
+pub fn serve<R, W>(input: R, output: W) -> (Handle, mpsc::Receiver<Request>)
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -112,22 +141,56 @@ where
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(32);
     let write_tx2 = write_tx.clone();
     let (dispatch_tx, dispatch_rx) = mpsc::channel::<Request>(32);
+    let (read_res_tx, read_res_rx) = oneshot::channel();
+    let (write_res_tx, write_res_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
     tokio::spawn(async move {
-        read_loop(input, write_tx2, dispatch_tx)
-            .await
-            .expect("read loop crash")
+        let res = read_loop(input, shutdown_rx, write_tx2, dispatch_tx).await;
+        // Handle may already be dropped.
+        let _ = read_res_tx.send(res);
     });
     tokio::spawn(async move {
-        write_loop(output, write_rx)
-            .await
-            .expect("write loop crash")
+        let res = write_loop(output, write_rx).await;
+        // Handle may already be dropped.
+        let _ = write_res_tx.send(res);
     });
 
-    (RequestSender(write_tx), dispatch_rx)
+    (
+        Handle {
+            write_res: write_res_rx,
+            read_res: read_res_rx,
+            write_loop_handle: write_tx,
+            shutdown: Some(shutdown_tx),
+        },
+        dispatch_rx,
+    )
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+async fn read_or_shutdown<S>(
+    stream: &mut S,
+    shutdown: &mut oneshot::Receiver<()>,
+) -> Option<Result<RawFrame, CodecError>>
+where
+    S: Unpin + Stream<Item = Result<RawFrame, CodecError>>,
+{
+    let select_res = select(stream.next(), shutdown).await;
+    match select_res {
+        Either::Left((None, _)) => None,
+        Either::Left((Some(frame), _)) => Some(frame),
+        Either::Right((_, _)) => None,
+    }
 }
 
 async fn read_loop<R>(
     input: R,
+    mut shutdown: oneshot::Receiver<()>,
     mut write_tx: mpsc::Sender<WriteCmd>,
     mut dispatch_tx: mpsc::Sender<Request>,
 ) -> Result<(), Error>
@@ -137,9 +200,8 @@ where
     let codec_in: Codec<RawFrame> = Codec::new();
     let mut input = FramedRead::new(input, codec_in);
 
-    while let Some(frame) = input.try_next().await? {
-        let frame: Frame = frame.try_into()?;
-        match frame {
+    while let Some(frame) = read_or_shutdown(&mut input, &mut shutdown).await {
+        match frame?.try_into()? {
             Frame::Request {
                 tag,
                 command,
@@ -150,7 +212,11 @@ where
                     write_handle: write_tx.clone(),
                     sent: false,
                 });
-                dispatch_tx.send(Request(command, fields, ticket)).await?;
+
+                // The application may close its dispatch channel. All
+                // incoming requests will generate a "Request dropped
+                // without reply" error.
+                let _ = dispatch_tx.send(Request(command, fields, ticket)).await;
             }
 
             Frame::Response { tag, response } => {
@@ -163,10 +229,7 @@ where
     Ok(())
 }
 
-async fn write_loop<W>(
-    output: W,
-    mut input: mpsc::Receiver<WriteCmd>,
-) -> Result<(), Error>
+async fn write_loop<W>(output: W, mut input: mpsc::Receiver<WriteCmd>) -> Result<(), Error>
 where
     W: AsyncWrite + Unpin,
 {

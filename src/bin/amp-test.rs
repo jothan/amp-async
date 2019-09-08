@@ -31,7 +31,9 @@ async fn sum_request(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (mut request, dispatch) = serve(stdin(), stdout());
+    let (handle, dispatch) = serve(stdin(), stdout());
+
+    let mut request = handle.request_sender();
 
     let mut fields = RawFrame::new();
     fields.insert("a".into(), "123".into());
@@ -56,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .await;
+
+    handle.join().await?;
 
     Ok(())
 }
