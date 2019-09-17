@@ -6,16 +6,16 @@ use bytes::Bytes;
 use crate::Error;
 
 pub type RawFrame = HashMap<Bytes, Bytes>;
-pub type Response = Result<RawFrame, WireError>;
+pub(crate) type Response = Result<RawFrame, WireError>;
 
 #[derive(Debug, Clone)]
-pub struct WireError {
-    code: Bytes,
-    description: Bytes,
+pub(crate) struct WireError {
+    pub(crate) code: Bytes,
+    pub(crate) description: Bytes,
 }
 
 #[derive(Debug, Clone)]
-pub enum Frame {
+pub(crate) enum Frame {
     Request {
         command: Bytes,
         tag: Option<Bytes>,

@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use crate::codecs::CodecError;
 
 #[derive(Debug)]
@@ -8,6 +10,7 @@ pub enum Error {
     RecvError,
     SendError,
     Codec(CodecError),
+    Remote { code: Bytes, description: Bytes },
 }
 
 impl std::fmt::Display for Error {

@@ -84,13 +84,16 @@ impl RequestSender {
         &mut self,
         command: Bytes,
         fields: RawFrame,
-    ) -> Result<Response, Error> {
+    ) -> Result<RawFrame, Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .send(WriteCmd::Request(command, fields, Some(tx)))
             .await?;
 
-        Ok(rx.await?)
+        rx.await?.map_err(|err| Error::Remote {
+            code: err.code,
+            description: err.description,
+        })
     }
 
     pub async fn call_remote_noreply(
