@@ -9,6 +9,9 @@ categories = ["network-programming"]
 
 
 [dependencies]
-tokio = {git="https://github.com/tokio-rs/tokio.git", rev="5f2f3f07"}
+tokio = "0.2.0-alpha.4"
 bytes = "0.4.12"
 futures-util-preview = "0.3.0-alpha.18"
+
+[patch.crates-io]
+tokio = {git="https://github.com/jothan/tokio.git", rev="fix-blocking-bookeeping"}
