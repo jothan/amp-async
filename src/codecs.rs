@@ -3,6 +3,10 @@ use std::convert::TryInto;
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::codec::{Decoder, Encoder};
 
+const AMP_KEY_LIMIT: usize = 0xff;
+const AMP_VALUE_LIMIT: usize = 0xffff;
+const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Codec<D = Vec<(Bytes, Bytes)>> {
     state: State,
@@ -31,7 +35,7 @@ where
     }
 
     fn read_key(length: usize, buf: &mut BytesMut) -> Result<Option<Bytes>, CodecError> {
-        if length > 255 {
+        if length > AMP_KEY_LIMIT {
             return Err(CodecError::KeyTooLong);
         }
 
@@ -48,7 +52,6 @@ where
     }
 }
 
-const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 
 impl<D> Decoder for Codec<D>
 where
@@ -59,7 +62,7 @@ where
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         loop {
-            if buf.len() < 2 {
+            if buf.len() < LENGTH_SIZE {
                 return Ok(None);
             }
 
@@ -115,10 +118,10 @@ where
             if key.is_empty() {
                 return Err(CodecError::EmptyKey);
             }
-            if key.len() > 255 {
+            if key.len() > AMP_KEY_LIMIT {
                 return Err(CodecError::KeyTooLong);
             }
-            if value.len() > 0xffff {
+            if value.len() > AMP_VALUE_LIMIT {
                 return Err(CodecError::ValueTooLong);
             }
 
