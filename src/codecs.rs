@@ -206,3 +206,28 @@ mod test {
         assert_eq!(buf, WWW_EXAMPLE);
     }
 }
+
+pub fn encode_list<I>(input: I) -> Option<Vec<u8>>
+where
+    I: IntoIterator,
+    I::Item: AsRef<[u8]>,
+{
+    let mut output = Vec::new();
+
+    for item in input {
+        let item = item.as_ref();
+        if item.is_empty() || item.len() > AMP_VALUE_LIMIT {
+            return None;
+        }
+
+        let len_u16 = (item.len() as u16).to_be_bytes();
+        output.extend(len_u16.as_ref());
+        output.extend_from_slice(item);
+
+        if output.len() > AMP_VALUE_LIMIT {
+            return None;
+        }
+    }
+
+    Some(output)
+}
