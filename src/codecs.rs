@@ -216,7 +216,7 @@ where
 
     for item in input {
         let item = item.as_ref();
-        if item.is_empty() || item.len() > AMP_VALUE_LIMIT {
+        if item.len() > AMP_VALUE_LIMIT {
             return None;
         }
 
