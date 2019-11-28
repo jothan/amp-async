@@ -33,8 +33,8 @@ impl From<tokio::sync::oneshot::error::RecvError> for Error {
     }
 }
 
-impl From<tokio::sync::mpsc::error::SendError> for Error {
-    fn from(_error: tokio::sync::mpsc::error::SendError) -> Self {
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
+    fn from(_error: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Self::SendError
     }
 }

@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::fmt::Write;
 
 use bytes::Bytes;
+
 use futures_util::future::select;
 use futures_util::future::Either;
-use tokio::codec::{FramedRead, FramedWrite};
+use futures_util::sink::SinkExt;
+use futures_util::stream::{Stream, StreamExt};
+
 use tokio::prelude::*;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codecs::CodecError;
 use crate::frame::Response;
@@ -32,7 +35,7 @@ pub struct ReplyTicket {
 }
 
 impl ReplyTicket {
-    pub async fn ok(mut self, reply: RawFrame) -> Result<(), mpsc::error::SendError> {
+    pub async fn ok(mut self, reply: RawFrame) -> Result<(), Error> {
         self.sent = true;
         self.write_handle
             .send(WriteCmd::Frame(Frame::Response {
@@ -48,7 +51,7 @@ impl ReplyTicket {
         mut self,
         code: Option<Bytes>,
         description: Option<Bytes>,
-    ) -> Result<(), mpsc::error::SendError> {
+    ) -> Result<(), Error> {
         self.sent = true;
         let frame = Frame::error(self.tag.split_off(0), code, description);
         self.write_handle.send(WriteCmd::Frame(frame)).await?;
@@ -239,7 +242,6 @@ where
     let codec_out: Codec<RawFrame> = Codec::new();
     let mut output = FramedWrite::new(output, codec_out);
     let mut seqno: u64 = 0;
-    let mut seqno_str = String::with_capacity(10);
     let mut reply_map = HashMap::new();
 
     while let Some(msg) = input.next().await {
@@ -251,10 +253,8 @@ where
             WriteCmd::Request(command, fields, reply) => {
                 let tag = reply.map(|reply| {
                     seqno += 1;
-                    seqno_str.clear();
-                    write!(seqno_str, "{:x}", seqno).unwrap();
+                    let seq_str = Bytes::from(format!("{:x}", seqno));
 
-                    let seq_str: Bytes = seqno_str.as_bytes().into();
                     reply_map.insert(seq_str.clone(), reply);
                     seq_str
                 });

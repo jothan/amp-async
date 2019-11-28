@@ -1,6 +1,8 @@
 use bytes::Bytes;
+
+use futures_util::stream::StreamExt;
+
 use tokio::io::{stdin, stdout};
-use tokio::prelude::*;
 
 use amp_async::{serve, RawFrame, ReplyTicket};
 

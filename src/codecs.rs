@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use tokio::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder};
 
 const AMP_KEY_LIMIT: usize = 0xff;
 const AMP_VALUE_LIMIT: usize = 0xffff;
@@ -51,7 +51,6 @@ where
         }
     }
 }
-
 
 impl<D> Decoder for Codec<D>
 where
@@ -126,13 +125,13 @@ where
             }
 
             dst.reserve(LENGTH_SIZE * 2 + key.len() + value.len());
-            dst.put_u16_be(key.len().try_into().unwrap());
+            dst.put_u16(key.len().try_into().unwrap());
             dst.extend(key);
-            dst.put_u16_be(value.len().try_into().unwrap());
+            dst.put_u16(value.len().try_into().unwrap());
             dst.extend(value);
         }
         dst.reserve(LENGTH_SIZE);
-        dst.put_u16_be(0);
+        dst.put_u16(0);
 
         Ok(())
     }
