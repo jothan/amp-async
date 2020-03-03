@@ -46,16 +46,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("res2: {:?}", res);
 
     dispatch
-        .for_each_concurrent(10, |request| {
-            async move {
-                eprintln!("got request: {:?} {:?}", request.0, request.1);
-                match request.0.as_ref() {
-                    b"Sum" => sum_request(request.1, request.2).await.unwrap(),
-                    _ => {
-                        if let Some(tag) = request.2 {
-                            tag.error(Some("UNHANDLED".into()), None).await.unwrap();
-                        };
-                    }
+        .for_each_concurrent(10, |request| async move {
+            eprintln!("got request: {:?} {:?}", request.0, request.1);
+            match request.0.as_ref() {
+                b"Sum" => sum_request(request.1, request.2).await.unwrap(),
+                _ => {
+                    if let Some(tag) = request.2 {
+                        tag.error(Some("UNHANDLED".into()), None).await.unwrap();
+                    };
                 }
             }
         })
