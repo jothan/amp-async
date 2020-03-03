@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 const AMP_KEY_LIMIT: usize = 0xff;
@@ -44,7 +44,7 @@ where
 
     fn read_delimited(length: usize, buf: &mut BytesMut) -> Option<Bytes> {
         if buf.len() >= length + LENGTH_SIZE {
-            buf.split_to(LENGTH_SIZE);
+            buf.advance(LENGTH_SIZE);
             Some(buf.split_to(length).freeze())
         } else {
             None
@@ -71,7 +71,7 @@ where
             match self.state {
                 State::Key => {
                     if length == 0 {
-                        buf.split_to(LENGTH_SIZE);
+                        buf.advance(LENGTH_SIZE);
                         return Ok(Some(std::mem::replace(&mut self.frame, Default::default())));
                     } else {
                         match Self::read_key(length, buf)? {
