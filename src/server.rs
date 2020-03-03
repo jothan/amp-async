@@ -14,7 +14,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codecs::CodecError;
 use crate::frame::Response;
-use crate::{Codec, Error, Frame, RawFrame};
+use crate::{Encoder, Decoder, Error, Frame, RawFrame};
 
 #[derive(Debug)]
 pub struct Request(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
@@ -203,7 +203,7 @@ async fn read_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let codec_in: Codec<RawFrame> = Codec::new();
+    let codec_in: Decoder<RawFrame> = Decoder::new();
     let mut input = FramedRead::new(input, codec_in);
 
     while let Some(frame) = read_or_shutdown(&mut input, &mut shutdown).await {
@@ -239,7 +239,7 @@ async fn write_loop<W>(output: W, mut input: mpsc::Receiver<WriteCmd>) -> Result
 where
     W: AsyncWrite + Unpin,
 {
-    let codec_out: Codec<RawFrame> = Codec::new();
+    let codec_out: Encoder<RawFrame> = Encoder::new();
     let mut output = FramedWrite::new(output, codec_out);
     let mut seqno: u64 = 0;
     let mut reply_map = HashMap::new();

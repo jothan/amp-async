@@ -8,7 +8,7 @@ const AMP_VALUE_LIMIT: usize = 0xffff;
 const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 
 #[derive(Debug, Default, PartialEq)]
-pub struct Codec<D = Vec<(Bytes, Bytes)>> {
+pub struct Dec<D = Vec<(Bytes, Bytes)>> {
     state: State,
     key: Bytes,
     frame: D,
@@ -26,7 +26,7 @@ impl Default for State {
     }
 }
 
-impl<D> Codec<D>
+impl<D> Dec<D>
 where
     D: Default,
 {
@@ -52,7 +52,7 @@ where
     }
 }
 
-impl<D> Decoder for Codec<D>
+impl<D> Decoder for Dec<D>
 where
     D: Default + Extend<(Bytes, Bytes)>,
 {
@@ -100,7 +100,23 @@ where
     }
 }
 
-impl<D, K, V> Encoder for Codec<D>
+pub struct Enc<D> {
+    _phantom: std::marker::PhantomData<D>,
+}
+
+impl<D> Default for Enc<D> {
+    fn default() -> Self {
+        Self { _phantom: Default::default() }
+    }
+}
+
+impl<D> Enc<D> {
+    pub fn new() -> Self {
+        Default::default()
+    }
+}
+
+impl<D, K, V> Encoder for Enc<D>
 where
     D: IntoIterator<Item = (K, V)>,
     K: AsRef<[u8]>,
@@ -163,7 +179,7 @@ impl std::error::Error for CodecError {}
 mod test {
     use crate::*;
     use bytes::BytesMut;
-    use tokio::codec::{Decoder, Encoder};
+    use tokio_util::codec::{Decoder as _, Encoder as _};
 
     const WWW_EXAMPLE: &[u8] = &[
         0x00, 0x04, 0x5F, 0x61, 0x73, 0x6B, 0x00, 0x02, 0x32, 0x33, 0x00, 0x08, 0x5F, 0x63, 0x6F,
@@ -179,11 +195,11 @@ mod test {
 
     #[test]
     fn decode_example() {
-        let mut codec = Codec::<Vec<_>>::new();
+        let mut dec = Decoder::<Vec<_>>::new();
         let mut buf = BytesMut::new();
         buf.extend(WWW_EXAMPLE);
 
-        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        let frame = dec.decode(&mut buf).unwrap().unwrap();
 
         assert_eq!(
             frame
@@ -193,40 +209,42 @@ mod test {
             WWW_EXAMPLE_DEC
         );
         assert_eq!(buf.len(), 0);
-        assert_eq!(codec, Codec::new());
+        assert_eq!(dec, Decoder::<Vec<_>>::new());
     }
 
     #[test]
     fn encode_example() {
-        let mut codec = Codec::new();
+        let mut codec = Encoder::new();
         let mut buf = BytesMut::new();
 
-        codec.encode(WWW_EXAMPLE_DEC.to_vec(), &mut buf).unwrap();
+        codec.encode(WWW_EXAMPLE_DEC.iter().copied(), &mut buf).unwrap();
         assert_eq!(buf, WWW_EXAMPLE);
     }
 }
 
-pub fn encode_list<I>(input: I) -> Option<Vec<u8>>
+pub fn encode_list<I, O>(input: I, mut output: O) -> Result<(), CodecError>
 where
     I: IntoIterator,
     I::Item: AsRef<[u8]>,
+    O: BufMut,
 {
-    let mut output = Vec::new();
+    let mut length = 0;
 
     for item in input {
         let item = item.as_ref();
         if item.len() > AMP_VALUE_LIMIT {
-            return None;
+            return Err(CodecError::ValueTooLong);
         }
 
-        let len_u16 = (item.len() as u16).to_be_bytes();
-        output.extend(len_u16.as_ref());
-        output.extend_from_slice(item);
-
-        if output.len() > AMP_VALUE_LIMIT {
-            return None;
+        let item_length = LENGTH_SIZE + item.len();
+        length += item_length;
+        if length > AMP_VALUE_LIMIT {
+            return Err(CodecError::ValueTooLong);
         }
+
+        output.put_u16(item.len().try_into().unwrap());
+        output.put_slice(item);
     }
 
-    Some(output)
+    Ok(())
 }
