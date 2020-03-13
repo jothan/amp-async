@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use crate::Error;
 
-pub type RawFrame = HashMap<Bytes, Bytes>;
+pub type RawFrame = HashMap<Vec<u8>, Bytes>;
 pub(crate) type Response = Result<RawFrame, WireError>;
 
 #[derive(Debug, Clone)]

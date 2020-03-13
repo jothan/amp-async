@@ -29,17 +29,16 @@ enum WriteCmd {
 
 #[derive(Debug)]
 pub struct ReplyTicket {
-    tag: Bytes,
+    tag: Option<Bytes>,
     write_handle: mpsc::Sender<WriteCmd>,
-    sent: bool,
 }
 
 impl ReplyTicket {
     pub async fn ok(mut self, reply: RawFrame) -> Result<(), Error> {
-        self.sent = true;
+        let tag = self.tag.take().expect("Tag taken out of sequence");
         self.write_handle
             .send(WriteCmd::Frame(Frame::Response {
-                tag: self.tag.split_off(0),
+                tag,
                 response: Ok(reply),
             }))
             .await?;
@@ -52,8 +51,8 @@ impl ReplyTicket {
         code: Option<Bytes>,
         description: Option<Bytes>,
     ) -> Result<(), Error> {
-        self.sent = true;
-        let frame = Frame::error(self.tag.split_off(0), code, description);
+        let tag = self.tag.take().expect("Tag taken out of sequence");
+        let frame = Frame::error(tag, code, description);
         self.write_handle.send(WriteCmd::Frame(frame)).await?;
 
         Ok(())
@@ -62,10 +61,10 @@ impl ReplyTicket {
 
 impl Drop for ReplyTicket {
     fn drop(&mut self) {
-        if !self.sent {
+        if let Some(tag) = self.tag.take() {
             let mut write_handle = self.write_handle.clone();
             let frame = Frame::error(
-                self.tag.split_off(0),
+                tag,
                 None,
                 Some("Request dropped without reply".into()),
             );
@@ -214,9 +213,8 @@ where
                 fields,
             } => {
                 let ticket = tag.map(|tag| ReplyTicket {
-                    tag,
+                    tag: Some(tag),
                     write_handle: write_tx.clone(),
-                    sent: false,
                 });
 
                 // The application may close its dispatch channel. All
@@ -253,10 +251,8 @@ where
             WriteCmd::Request(command, fields, reply) => {
                 let tag = reply.map(|reply| {
                     seqno += 1;
-                    let seq_str = Bytes::from(format!("{:x}", seqno));
-
-                    reply_map.insert(seq_str.clone(), reply);
-                    seq_str
+                    reply_map.insert(seqno, reply);
+                    format!("{:x}", seqno).into()
                 });
 
                 let frame = Frame::Request {
@@ -267,7 +263,11 @@ where
                 output.send(frame.into()).await?;
             }
             WriteCmd::Reply(tag, response) => {
-                let reply_tx = reply_map.remove(&tag).ok_or(Error::UnmatchedReply)?;
+                let reply_tx = std::str::from_utf8(&tag).ok()
+                    .and_then(|tag_str| u64::from_str_radix(tag_str, 16).ok())
+                    .and_then(|tag_u64| reply_map.remove(&tag_u64))
+                    .ok_or(Error::UnmatchedReply)?;
+
                 reply_tx.send(response).map_err(|_| Error::SendError)?;
             }
             WriteCmd::Exit => input.close(),

@@ -10,7 +10,7 @@ const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 #[derive(Debug, Default, PartialEq)]
 pub struct Dec<D = Vec<(Bytes, Bytes)>> {
     state: State,
-    key: Bytes,
+    key: Vec<u8>,
     frame: D,
 }
 
@@ -54,7 +54,7 @@ where
 
 impl<D> Decoder for Dec<D>
 where
-    D: Default + Extend<(Bytes, Bytes)>,
+    D: Default + Extend<(Vec<u8>, Bytes)>,
 {
     type Error = CodecError;
     type Item = D;
@@ -72,11 +72,11 @@ where
                 State::Key => {
                     if length == 0 {
                         buf.advance(LENGTH_SIZE);
-                        return Ok(Some(std::mem::replace(&mut self.frame, Default::default())));
+                        return Ok(Some(std::mem::take(&mut self.frame)));
                     } else {
                         match Self::read_key(length, buf)? {
                             Some(key) => {
-                                self.key = key;
+                                self.key = key.to_vec();
                                 self.state = State::Value;
                             }
                             None => {
@@ -87,7 +87,7 @@ where
                 }
                 State::Value => match Self::read_delimited(length, buf) {
                     Some(value) => {
-                        let key = std::mem::replace(&mut self.key, Bytes::new());
+                        let key = std::mem::take(&mut self.key);
                         self.frame.extend(std::iter::once((key, value)));
                         self.state = State::Key;
                     }
