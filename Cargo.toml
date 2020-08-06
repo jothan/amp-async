@@ -10,6 +10,6 @@ categories = ["network-programming"]
 
 [dependencies]
 tokio = {version="0.2", features=["tcp", "io-util", "signal", "sync", "stream", "rt-util", "io-std", "macros"]}
-tokio-util = {version="0.2", features=["codec"]}
+tokio-util = {version="0.3", features=["codec"]}
 bytes = "0.5"
 futures-util = {version="0.3", features=["sink"]}

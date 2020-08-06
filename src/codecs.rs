@@ -116,14 +116,13 @@ impl<D> Enc<D> {
     }
 }
 
-impl<D, K, V> Encoder for Enc<D>
+impl<D, K, V> Encoder<D> for Enc<D>
 where
     D: IntoIterator<Item = (K, V)>,
     K: AsRef<[u8]>,
     V: AsRef<[u8]>,
 {
     type Error = CodecError;
-    type Item = D;
 
     fn encode(&mut self, item: D, dst: &mut BytesMut) -> Result<(), Self::Error> {
         for (key, value) in item {
