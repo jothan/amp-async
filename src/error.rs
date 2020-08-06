@@ -10,6 +10,7 @@ pub enum Error {
     RecvError,
     SendError,
     Codec(CodecError),
+    Serde(amp_serde::Error),
     Remote { code: Bytes, description: Bytes },
     IO(std::io::Error),
 }
@@ -43,5 +44,11 @@ impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
         Self::IO(error)
+    }
+}
+
+impl From<amp_serde::Error> for Error {
+    fn from(error: amp_serde::Error) -> Self {
+        Self::Serde(error)
     }
 }

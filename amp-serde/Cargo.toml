@@ -1,0 +1,12 @@
+[package]
+name = "amp-serde"
+version = "0.1.0"
+authors = ["Jonathan Bastien-Filiatrault <jonathan@zerospam.ca>"]
+edition = "2018"
+description = "AMP protocol serializer"
+license = "GPL-3.0+"
+categories = ["network-programming"]
+
+[dependencies]
+serde = { version="1.0", features=["derive"] }
+bytes = { version="0.5", features=["serde"] }

@@ -1,82 +1,15 @@
 use std::convert::TryInto;
-use std::fmt::Display;
 
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 use serde::ser::{
     Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeTuple, SerializeTupleStruct,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::codecs::{CodecError as Error, AMP_KEY_LIMIT, AMP_VALUE_LIMIT};
+use crate::Error;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Request<F> {
-    #[serde(rename = "_ask", skip_serializing_if = "Option::is_none")]
-    pub(crate) tag: Option<Bytes>,
-    #[serde(rename = "_command")]
-    pub(crate) command: String,
-    #[serde(flatten)]
-    pub fields: F,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OkResponse<F> {
-    #[serde(rename = "_answer")]
-    pub(crate) tag: Bytes,
-    #[serde(flatten)]
-    pub fields: F,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub(crate) struct ErrorResponse {
-    #[serde(rename = "_error")]
-    pub(crate) tag: Bytes,
-    #[serde(rename = "_error_code")]
-    pub code: String,
-    #[serde(rename = "_error_description")]
-    pub description: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(untagged)]
-enum Response<F> {
-    Ok(OkResponse<F>),
-    Err(ErrorResponse),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(untagged)]
-enum Frame<Q, R> {
-    Request(Request<Q>),
-    Response(Response<R>),
-}
-
-impl<F> From<Response<F>> for Result<OkResponse<F>, ErrorResponse> {
-    fn from(value: Response<F>) -> Result<OkResponse<F>, ErrorResponse> {
-        match value {
-            Response::Ok(v) => Ok(v),
-            Response::Err(e) => Err(e),
-        }
-    }
-}
-
-impl<F> From<Result<OkResponse<F>, ErrorResponse>> for Response<F> {
-    fn from(value: Result<OkResponse<F>, ErrorResponse>) -> Response<F> {
-        match value {
-            Ok(v) => Response::Ok(v),
-            Err(e) => Response::Err(e),
-        }
-    }
-}
-
-impl serde::ser::Error for Error {
-    fn custom<T>(msg: T) -> Error
-    where
-        T: Display,
-    {
-        Error::Serde(msg.to_string())
-    }
-}
+pub(crate) const AMP_KEY_LIMIT: usize = 0xff;
+pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 
 #[derive(Debug)]
 pub struct Serializer;
@@ -349,4 +282,8 @@ impl<'a> serde::Serializer for &'a Serializer {
     ) -> Result<Self::SerializeStructVariant, Error> {
         Err(Error::Unsupported)
     }
+}
+
+pub fn to_bytes<T: Serialize>(value: T) -> Result<Vec<u8>, Error> {
+    value.serialize(&Serializer)
 }

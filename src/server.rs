@@ -13,12 +13,13 @@ use tokio::sync::{mpsc, oneshot, Barrier};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 
-use crate::codecs::CodecError;
+use amp_serde::{ErrorResponse, OkResponse, Request};
+
 use crate::frame::Response;
 use crate::{Decoder, Error, Frame, RawFrame};
 
 #[derive(Debug)]
-pub struct Request(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
+pub struct DispatchRequest(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
 
 struct ExpectReply {
     tag: u64,
@@ -26,7 +27,7 @@ struct ExpectReply {
     barrier: Arc<tokio::sync::Barrier>,
 }
 
-type _FrameMaker = Box<dyn FnOnce(Option<Bytes>) -> Result<Vec<u8>, CodecError> + Send>;
+type _FrameMaker = Box<dyn FnOnce(Option<Bytes>) -> Result<Vec<u8>, amp_serde::Error> + Send>;
 
 struct FrameMaker(_FrameMaker);
 
@@ -52,8 +53,7 @@ impl ReplyTicket {
     pub async fn ok<R: Serialize>(mut self, reply: R) -> Result<(), Error> {
         let tag = self.tag.take().expect("Tag taken out of sequence");
 
-        let reply =
-            crate::ser::OkResponse { tag, fields: reply }.serialize(&crate::ser::Serializer)?;
+        let reply = amp_serde::to_bytes(OkResponse { tag, fields: reply })?;
 
         self.write_handle
             .send(WriteCmd::Reply(reply.into()))
@@ -69,12 +69,11 @@ impl ReplyTicket {
     ) -> Result<(), Error> {
         let tag = self.tag.take().expect("Tag taken out of sequence");
 
-        let reply = crate::ser::ErrorResponse {
+        let reply = amp_serde::to_bytes(ErrorResponse {
             tag,
             code: code.unwrap_or_else(|| "UNKNOWN".into()),
             description: description.unwrap_or_else(|| "".into()),
-        }
-        .serialize(&crate::ser::Serializer)?;
+        })?;
 
         self.write_handle
             .send(WriteCmd::Reply(reply.into()))
@@ -88,12 +87,11 @@ impl Drop for ReplyTicket {
     fn drop(&mut self) {
         if let Some(tag) = self.tag.take() {
             let mut write_handle = self.write_handle.clone();
-            let reply = crate::ser::ErrorResponse {
+            let reply = amp_serde::to_bytes(ErrorResponse {
                 tag,
                 code: "UNKNOWN".into(),
                 description: "Request dropped without reply".into(),
-            }
-            .serialize(&crate::ser::Serializer)
+            })
             .unwrap();
 
             // Can't wait for poll_drop
@@ -119,12 +117,11 @@ impl RequestSender {
         let (tx, rx) = oneshot::channel();
 
         let frame = FrameMaker(Box::new(move |tag| {
-            crate::ser::Request {
+            amp_serde::to_bytes(Request {
                 tag,
                 command,
                 fields: request,
-            }
-            .serialize(&crate::ser::Serializer)
+            })
         }));
 
         self.0.send(WriteCmd::Request(frame, Some(tx))).await?;
@@ -141,12 +138,11 @@ impl RequestSender {
         request: Q,
     ) -> Result<(), Error> {
         let frame = FrameMaker(Box::new(move |tag| {
-            crate::ser::Request {
+            amp_serde::to_bytes(Request {
                 tag,
                 command,
                 fields: request,
-            }
-            .serialize(&crate::ser::Serializer)
+            })
         }));
 
         self.0.send(WriteCmd::Request(frame, None)).await?;
@@ -182,13 +178,13 @@ impl Handle {
     }
 }
 
-pub fn serve<R, W>(input: R, output: W) -> (Handle, mpsc::Receiver<Request>)
+pub fn serve<R, W>(input: R, output: W) -> (Handle, mpsc::Receiver<DispatchRequest>)
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(32);
-    let (dispatch_tx, dispatch_rx) = mpsc::channel::<Request>(32);
+    let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(32);
     let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(32);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -224,7 +220,7 @@ async fn read_loop<R>(
     input: R,
     mut shutdown: oneshot::Receiver<()>,
     mut write_tx: mpsc::Sender<WriteCmd>,
-    mut dispatch_tx: mpsc::Sender<Request>,
+    mut dispatch_tx: mpsc::Sender<DispatchRequest>,
     mut expect_rx: mpsc::Receiver<ExpectReply>,
 ) -> Result<(), Error>
 where
@@ -260,7 +256,7 @@ async fn dispatch_frame(
     frame: RawFrame,
     reply_map: &mut ReplyMap,
     write_tx: &mut mpsc::Sender<WriteCmd>,
-    dispatch_tx: &mut mpsc::Sender<Request>,
+    dispatch_tx: &mut mpsc::Sender<DispatchRequest>,
 ) -> Result<(), Error> {
     match frame.try_into()? {
         Frame::Request {
@@ -276,7 +272,9 @@ async fn dispatch_frame(
             // The application may close its dispatch channel. All
             // incoming requests will generate a "Request dropped
             // without reply" error.
-            let _ = dispatch_tx.send(Request(command, fields, ticket)).await;
+            let _ = dispatch_tx
+                .send(DispatchRequest(command, fields, ticket))
+                .await;
         }
 
         Frame::Response { tag, response } => {

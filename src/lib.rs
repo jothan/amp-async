@@ -3,7 +3,6 @@
 mod codecs;
 mod error;
 mod frame;
-pub(crate) mod ser;
 mod server;
 
 pub use codecs::{encode_list, Dec as Decoder, Enc as Encoder};
