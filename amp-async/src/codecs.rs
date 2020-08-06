@@ -180,9 +180,12 @@ impl std::error::Error for CodecError {}
 
 #[cfg(test)]
 mod test {
-    use crate::*;
+    use amp_serde::Request;
     use bytes::BytesMut;
-    use tokio_util::codec::{Decoder as _, Encoder as _};
+    use serde::Serialize;
+    use tokio_util::codec::Decoder as _;
+
+    use crate::*;
 
     const WWW_EXAMPLE: &[u8] = &[
         0x00, 0x04, 0x5F, 0x61, 0x73, 0x6B, 0x00, 0x02, 0x32, 0x33, 0x00, 0x08, 0x5F, 0x63, 0x6F,
@@ -217,23 +220,19 @@ mod test {
 
     #[test]
     fn encode_example() {
-        use crate::ser::Serializer;
-        use serde::Serialize;
-
         #[derive(Serialize)]
-        struct Added {
+        struct Sum {
             a: u32,
             b: u32,
         }
-        let fields = Added { a: 13, b: 81 };
+        let fields = Sum { a: 13, b: 81 };
 
-        let command = crate::ser::Request {
+        let buf = amp_serde::to_bytes(Request {
             command: "Sum".into(),
             tag: Some(b"23".as_ref().into()),
             fields,
-        };
-
-        let buf = command.serialize(&Serializer).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(buf, WWW_EXAMPLE);
     }
