@@ -11,6 +11,7 @@ pub enum Error {
     SendError,
     Codec(CodecError),
     Remote { code: Bytes, description: Bytes },
+    IO(std::io::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -36,5 +37,11 @@ impl From<tokio::sync::oneshot::error::RecvError> for Error {
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(_error: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Self::SendError
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::IO(error)
     }
 }

@@ -27,19 +27,6 @@ pub(crate) enum Frame {
     },
 }
 
-impl Frame {
-    pub fn error(tag: Bytes, code: Option<Bytes>, description: Option<Bytes>) -> Self {
-        let code = code.unwrap_or_else(|| "UNKNOWN".into());
-
-        // Twisted absolutely needs this field.
-        let description = description.unwrap_or_else(|| "Unknown Error".into());
-        Self::Response {
-            tag,
-            response: Err(WireError { code, description }),
-        }
-    }
-}
-
 impl TryFrom<RawFrame> for Frame {
     type Error = crate::Error;
 
@@ -84,41 +71,6 @@ impl TryFrom<RawFrame> for Frame {
             })
         } else {
             Err(Error::ConfusedFrame)
-        }
-    }
-}
-
-impl From<Frame> for RawFrame {
-    fn from(frame: Frame) -> RawFrame {
-        match frame {
-            Frame::Response {
-                tag,
-                response: Ok(mut fields),
-            } => {
-                fields.insert(b"_answer".as_ref().into(), tag);
-                fields
-            }
-            Frame::Response {
-                tag,
-                response: Err(WireError { code, description }),
-            } => {
-                let mut fields = RawFrame::new();
-                fields.insert("_error".into(), tag);
-                fields.insert("_error_code".into(), code);
-                fields.insert("_error_description".into(), description);
-                fields
-            }
-            Frame::Request {
-                command,
-                tag,
-                mut fields,
-            } => {
-                fields.insert("_command".into(), command);
-                if let Some(tag) = tag {
-                    fields.insert("_ask".into(), tag);
-                };
-                fields
-            }
         }
     }
 }

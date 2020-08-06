@@ -22,7 +22,7 @@ class Responder(amp.AMP):
         print(f'Did a sum: {a} + {b} = {total}')
         return {'total': total}
     
-RUST_PATH = 'target/release/amp-test'
+RUST_PATH = 'target/debug/amp-test'
 
 @inlineCallbacks
 def start():

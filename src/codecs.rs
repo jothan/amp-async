@@ -3,8 +3,8 @@ use std::convert::TryInto;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-const AMP_KEY_LIMIT: usize = 0xff;
-const AMP_VALUE_LIMIT: usize = 0xffff;
+pub(crate) const AMP_KEY_LIMIT: usize = 0xff;
+pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 
 #[derive(Debug, Default, PartialEq)]
@@ -160,6 +160,8 @@ pub enum CodecError {
     KeyTooLong,
     EmptyKey,
     ValueTooLong,
+    Serde(String),
+    Unsupported,
 }
 
 impl From<std::io::Error> for CodecError {
@@ -215,12 +217,24 @@ mod test {
 
     #[test]
     fn encode_example() {
-        let mut codec = Encoder::new();
-        let mut buf = BytesMut::new();
+        use crate::ser::Serializer;
+        use serde::Serialize;
 
-        codec
-            .encode(WWW_EXAMPLE_DEC.iter().copied(), &mut buf)
-            .unwrap();
+        #[derive(Serialize)]
+        struct Added {
+            a: u32,
+            b: u32,
+        }
+        let fields = Added { a: 13, b: 81 };
+
+        let command = crate::ser::Request {
+            command: "Sum".into(),
+            tag: Some(b"23".as_ref().into()),
+            fields,
+        };
+
+        let buf = command.serialize(&Serializer).unwrap();
+
         assert_eq!(buf, WWW_EXAMPLE);
     }
 }

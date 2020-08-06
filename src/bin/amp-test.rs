@@ -1,6 +1,7 @@
 use bytes::Bytes;
 
-use futures_util::stream::StreamExt;
+use futures::stream::StreamExt;
+use serde::Serialize;
 
 use tokio::io::{stdin, stdout};
 
@@ -13,6 +14,17 @@ fn parse_int(input: Option<Bytes>) -> Option<i64> {
         .and_then(|i| str::parse(i).ok())
 }
 
+#[derive(Serialize, Clone)]
+struct SumRequest {
+    a: i64,
+    b: i64,
+}
+
+#[derive(Serialize, Clone)]
+struct SumResponse {
+    total: i64,
+}
+
 async fn sum_request(
     mut fields: RawFrame,
     tag: Option<ReplyTicket>,
@@ -21,11 +33,8 @@ async fn sum_request(
     let b: i64 = parse_int(fields.remove(b"b".as_ref())).unwrap();
 
     if let Some(tag) = tag {
-        let sum = a + b;
-        let sum_str = format!("{}", sum);
-        let mut fields = RawFrame::new();
-        fields.insert("total".into(), sum_str.into());
-        tag.ok(fields).await?;
+        let resp = SumResponse { total: a + b };
+        tag.ok(resp).await?;
     };
 
     Ok(())
@@ -37,12 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut request = handle.request_sender();
 
-    let mut fields = RawFrame::new();
-    fields.insert("a".into(), "123".into());
-    fields.insert("b".into(), "321".into());
-    let res = request.call_remote("Sum".into(), fields.clone()).await?;
+    let res = request
+        .call_remote("Sum".into(), SumRequest { a: 123, b: 321 })
+        .await?;
     eprintln!("res1: {:?}", res);
-    let res = request.call_remote("Sum".into(), fields).await?;
+    let res = request
+        .call_remote("Sum".into(), SumRequest { a: 777, b: 777 })
+        .await?;
     eprintln!("res2: {:?}", res);
 
     dispatch

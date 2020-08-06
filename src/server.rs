@@ -1,30 +1,45 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::sync::Arc;
 
 use bytes::Bytes;
+use serde::Serialize;
 
-use futures_util::future::select;
-use futures_util::future::Either;
-use futures_util::sink::SinkExt;
-use futures_util::stream::{Stream, StreamExt};
+use futures::sink::SinkExt;
+use futures::stream::StreamExt;
 
 use tokio::prelude::*;
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio::sync::{mpsc, oneshot, Barrier};
+use tokio::task::JoinHandle;
+use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 
 use crate::codecs::CodecError;
 use crate::frame::Response;
-use crate::{Decoder, Encoder, Error, Frame, RawFrame};
+use crate::{Decoder, Error, Frame, RawFrame};
 
 #[derive(Debug)]
 pub struct Request(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
 
+struct ExpectReply {
+    tag: u64,
+    reply: oneshot::Sender<Response>,
+    barrier: Arc<tokio::sync::Barrier>,
+}
+
+type _FrameMaker = Box<dyn FnOnce(Option<Bytes>) -> Result<Vec<u8>, CodecError> + Send>;
+
+struct FrameMaker(_FrameMaker);
+
+impl std::fmt::Debug for FrameMaker {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(fmt, "callback")
+    }
+}
+
 #[derive(Debug)]
 enum WriteCmd {
-    Frame(Frame),
-    Request(Bytes, RawFrame, Option<oneshot::Sender<Response>>),
-    Reply(Bytes, Response),
-    Exit,
+    Reply(Bytes),
+    Request(FrameMaker, Option<oneshot::Sender<Response>>),
 }
 
 #[derive(Debug)]
@@ -34,13 +49,14 @@ pub struct ReplyTicket {
 }
 
 impl ReplyTicket {
-    pub async fn ok(mut self, reply: RawFrame) -> Result<(), Error> {
+    pub async fn ok<R: Serialize>(mut self, reply: R) -> Result<(), Error> {
         let tag = self.tag.take().expect("Tag taken out of sequence");
+
+        let reply =
+            crate::ser::OkResponse { tag, fields: reply }.serialize(&crate::ser::Serializer)?;
+
         self.write_handle
-            .send(WriteCmd::Frame(Frame::Response {
-                tag,
-                response: Ok(reply),
-            }))
+            .send(WriteCmd::Reply(reply.into()))
             .await?;
 
         Ok(())
@@ -48,12 +64,21 @@ impl ReplyTicket {
 
     pub async fn error(
         mut self,
-        code: Option<Bytes>,
-        description: Option<Bytes>,
+        code: Option<String>,
+        description: Option<String>,
     ) -> Result<(), Error> {
         let tag = self.tag.take().expect("Tag taken out of sequence");
-        let frame = Frame::error(tag, code, description);
-        self.write_handle.send(WriteCmd::Frame(frame)).await?;
+
+        let reply = crate::ser::ErrorResponse {
+            tag,
+            code: code.unwrap_or_else(|| "UNKNOWN".into()),
+            description: description.unwrap_or_else(|| "".into()),
+        }
+        .serialize(&crate::ser::Serializer)?;
+
+        self.write_handle
+            .send(WriteCmd::Reply(reply.into()))
+            .await?;
 
         Ok(())
     }
@@ -63,10 +88,18 @@ impl Drop for ReplyTicket {
     fn drop(&mut self) {
         if let Some(tag) = self.tag.take() {
             let mut write_handle = self.write_handle.clone();
-            let frame = Frame::error(tag, None, Some("Request dropped without reply".into()));
+            let reply = crate::ser::ErrorResponse {
+                tag,
+                code: "UNKNOWN".into(),
+                description: "Request dropped without reply".into(),
+            }
+            .serialize(&crate::ser::Serializer)
+            .unwrap();
+
+            // Can't wait for poll_drop
             tokio::spawn(async move {
                 write_handle
-                    .send(WriteCmd::Frame(frame))
+                    .send(WriteCmd::Reply(reply.into()))
                     .await
                     .expect("error on drop")
             });
@@ -78,15 +111,23 @@ impl Drop for ReplyTicket {
 pub struct RequestSender(mpsc::Sender<WriteCmd>);
 
 impl RequestSender {
-    pub async fn call_remote(
+    pub async fn call_remote<Q: Serialize + Send + 'static>(
         &mut self,
-        command: Bytes,
-        fields: RawFrame,
+        command: String,
+        request: Q,
     ) -> Result<RawFrame, Error> {
         let (tx, rx) = oneshot::channel();
-        self.0
-            .send(WriteCmd::Request(command, fields, Some(tx)))
-            .await?;
+
+        let frame = FrameMaker(Box::new(move |tag| {
+            crate::ser::Request {
+                tag,
+                command,
+                fields: request,
+            }
+            .serialize(&crate::ser::Serializer)
+        }));
+
+        self.0.send(WriteCmd::Request(frame, Some(tx))).await?;
 
         rx.await?.map_err(|err| Error::Remote {
             code: err.code,
@@ -94,22 +135,29 @@ impl RequestSender {
         })
     }
 
-    pub async fn call_remote_noreply(
+    pub async fn call_remote_noreply<Q: Serialize + Send + 'static>(
         &mut self,
-        command: Bytes,
-        fields: RawFrame,
+        command: String,
+        request: Q,
     ) -> Result<(), Error> {
-        self.0
-            .send(WriteCmd::Request(command, fields, None))
-            .await?;
+        let frame = FrameMaker(Box::new(move |tag| {
+            crate::ser::Request {
+                tag,
+                command,
+                fields: request,
+            }
+            .serialize(&crate::ser::Serializer)
+        }));
+
+        self.0.send(WriteCmd::Request(frame, None)).await?;
 
         Ok(())
     }
 }
 
 pub struct Handle {
-    write_res: oneshot::Receiver<Result<(), Error>>,
-    read_res: oneshot::Receiver<Result<(), Error>>,
+    write_res: JoinHandle<Result<(), Error>>,
+    read_res: JoinHandle<Result<(), Error>>,
     write_loop_handle: mpsc::Sender<WriteCmd>,
     shutdown: Option<oneshot::Sender<()>>,
 }
@@ -124,8 +172,8 @@ impl Handle {
     }
 
     pub async fn join(mut self) -> Result<(), Error> {
-        let _ = (&mut self.write_res).await?;
-        let _ = (&mut self.read_res).await?;
+        let _ = (&mut self.write_res).await.unwrap()?;
+        let _ = (&mut self.read_res).await.unwrap()?;
         Ok(())
     }
 
@@ -140,27 +188,23 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(32);
-    let write_tx2 = write_tx.clone();
     let (dispatch_tx, dispatch_rx) = mpsc::channel::<Request>(32);
-    let (read_res_tx, read_res_rx) = oneshot::channel();
-    let (write_res_tx, write_res_rx) = oneshot::channel();
+    let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(32);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-    tokio::spawn(async move {
-        let res = read_loop(input, shutdown_rx, write_tx2, dispatch_tx).await;
-        // Handle may already be dropped.
-        let _ = read_res_tx.send(res);
-    });
-    tokio::spawn(async move {
-        let res = write_loop(output, write_rx).await;
-        // Handle may already be dropped.
-        let _ = write_res_tx.send(res);
-    });
+    let read_res = tokio::spawn(read_loop(
+        input,
+        shutdown_rx,
+        write_tx.clone(),
+        dispatch_tx,
+        expect_rx,
+    ));
+    let write_res = tokio::spawn(write_loop(output, write_rx, expect_tx));
 
     (
         Handle {
-            write_res: write_res_rx,
-            read_res: read_res_rx,
+            write_res,
+            read_res,
             write_loop_handle: write_tx,
             shutdown: Some(shutdown_tx),
         },
@@ -174,100 +218,119 @@ impl Drop for Handle {
     }
 }
 
-async fn read_or_shutdown<S>(
-    stream: &mut S,
-    shutdown: &mut oneshot::Receiver<()>,
-) -> Option<Result<RawFrame, CodecError>>
-where
-    S: Unpin + Stream<Item = Result<RawFrame, CodecError>>,
-{
-    let select_res = select(stream.next(), shutdown).await;
-    match select_res {
-        Either::Left((None, _)) => None,
-        Either::Left((Some(frame), _)) => Some(frame),
-        Either::Right((_, _)) => None,
-    }
-}
+type ReplyMap = HashMap<u64, oneshot::Sender<Response>>;
 
 async fn read_loop<R>(
     input: R,
     mut shutdown: oneshot::Receiver<()>,
     mut write_tx: mpsc::Sender<WriteCmd>,
     mut dispatch_tx: mpsc::Sender<Request>,
+    mut expect_rx: mpsc::Receiver<ExpectReply>,
 ) -> Result<(), Error>
 where
     R: AsyncRead + Unpin,
 {
     let codec_in: Decoder<RawFrame> = Decoder::new();
     let mut input = FramedRead::new(input, codec_in);
+    let mut reply_map = ReplyMap::new();
 
-    while let Some(frame) = read_or_shutdown(&mut input, &mut shutdown).await {
-        match frame?.try_into()? {
-            Frame::Request {
-                tag,
-                command,
-                fields,
-            } => {
-                let ticket = tag.map(|tag| ReplyTicket {
-                    tag: Some(tag),
-                    write_handle: write_tx.clone(),
-                });
-
-                // The application may close its dispatch channel. All
-                // incoming requests will generate a "Request dropped
-                // without reply" error.
-                let _ = dispatch_tx.send(Request(command, fields, ticket)).await;
+    loop {
+        tokio::select! {
+            frame = input.next() => {
+                if let Some(frame) = frame {
+                    dispatch_frame(frame?, &mut reply_map, &mut write_tx, &mut dispatch_tx).await?;
+                } else {
+                    break;
+                }
             }
-
-            Frame::Response { tag, response } => {
-                write_tx.send(WriteCmd::Reply(tag, response)).await?;
+            expect = expect_rx.recv() => {
+                if let Some(expect) = expect {
+                    reply_map.insert(expect.tag, expect.reply);
+                    expect.barrier.wait().await;
+                }
             }
+            _ = &mut shutdown => break
         }
     }
 
-    write_tx.send(WriteCmd::Exit).await?;
     Ok(())
 }
 
-async fn write_loop<W>(output: W, mut input: mpsc::Receiver<WriteCmd>) -> Result<(), Error>
+async fn dispatch_frame(
+    frame: RawFrame,
+    reply_map: &mut ReplyMap,
+    write_tx: &mut mpsc::Sender<WriteCmd>,
+    dispatch_tx: &mut mpsc::Sender<Request>,
+) -> Result<(), Error> {
+    match frame.try_into()? {
+        Frame::Request {
+            tag,
+            command,
+            fields,
+        } => {
+            let ticket = tag.map(|tag| ReplyTicket {
+                tag: Some(tag),
+                write_handle: write_tx.clone(),
+            });
+
+            // The application may close its dispatch channel. All
+            // incoming requests will generate a "Request dropped
+            // without reply" error.
+            let _ = dispatch_tx.send(Request(command, fields, ticket)).await;
+        }
+
+        Frame::Response { tag, response } => {
+            let reply_tx = std::str::from_utf8(&tag)
+                .ok()
+                .and_then(|tag_str| u64::from_str_radix(tag_str, 16).ok())
+                .and_then(|tag_u64| reply_map.remove(&tag_u64))
+                .ok_or(Error::UnmatchedReply)?;
+
+            reply_tx.send(response).map_err(|_| Error::SendError)?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn write_loop<W>(
+    output: W,
+    mut input: mpsc::Receiver<WriteCmd>,
+    mut expect_tx: mpsc::Sender<ExpectReply>,
+) -> Result<(), Error>
 where
     W: AsyncWrite + Unpin,
 {
-    let codec_out: Encoder<RawFrame> = Encoder::new();
-    let mut output = FramedWrite::new(output, codec_out);
+    let mut output = FramedWrite::new(output, BytesCodec::new());
     let mut seqno: u64 = 0;
-    let mut reply_map = HashMap::new();
 
     while let Some(msg) = input.next().await {
         match msg {
-            WriteCmd::Frame(frame) => {
-                let frame = frame.into();
+            WriteCmd::Reply(frame) => {
                 output.send(frame).await?;
             }
-            WriteCmd::Request(command, fields, reply) => {
-                let tag = reply.map(|reply| {
+            WriteCmd::Request(request, reply) => {
+                if let Some(reply) = reply {
                     seqno += 1;
-                    reply_map.insert(seqno, reply);
-                    format!("{:x}", seqno).into()
-                });
 
-                let frame = Frame::Request {
-                    command,
-                    tag,
-                    fields,
-                };
-                output.send(frame.into()).await?;
-            }
-            WriteCmd::Reply(tag, response) => {
-                let reply_tx = std::str::from_utf8(&tag)
-                    .ok()
-                    .and_then(|tag_str| u64::from_str_radix(tag_str, 16).ok())
-                    .and_then(|tag_u64| reply_map.remove(&tag_u64))
-                    .ok_or(Error::UnmatchedReply)?;
+                    let barrier = Arc::new(Barrier::new(2));
 
-                reply_tx.send(response).map_err(|_| Error::SendError)?;
+                    let expect = ExpectReply {
+                        tag: seqno,
+                        reply,
+                        barrier: barrier.clone(),
+                    };
+
+                    expect_tx.send(expect).await?;
+                    barrier.wait().await;
+
+                    output
+                        .send(request.0(Some(format!("{:x}", seqno).into()))?.into())
+                        .await?;
+                } else {
+                    output.send(request.0(None)?.into()).await?;
+                }
             }
-            WriteCmd::Exit => input.close(),
         }
     }
 
