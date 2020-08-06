@@ -106,7 +106,9 @@ pub struct Enc<D> {
 
 impl<D> Default for Enc<D> {
     fn default() -> Self {
-        Self { _phantom: Default::default() }
+        Self {
+            _phantom: Default::default(),
+        }
     }
 }
 
@@ -216,7 +218,9 @@ mod test {
         let mut codec = Encoder::new();
         let mut buf = BytesMut::new();
 
-        codec.encode(WWW_EXAMPLE_DEC.iter().copied(), &mut buf).unwrap();
+        codec
+            .encode(WWW_EXAMPLE_DEC.iter().copied(), &mut buf)
+            .unwrap();
         assert_eq!(buf, WWW_EXAMPLE);
     }
 }

@@ -14,7 +14,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codecs::CodecError;
 use crate::frame::Response;
-use crate::{Encoder, Decoder, Error, Frame, RawFrame};
+use crate::{Decoder, Encoder, Error, Frame, RawFrame};
 
 #[derive(Debug)]
 pub struct Request(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
@@ -63,11 +63,7 @@ impl Drop for ReplyTicket {
     fn drop(&mut self) {
         if let Some(tag) = self.tag.take() {
             let mut write_handle = self.write_handle.clone();
-            let frame = Frame::error(
-                tag,
-                None,
-                Some("Request dropped without reply".into()),
-            );
+            let frame = Frame::error(tag, None, Some("Request dropped without reply".into()));
             tokio::spawn(async move {
                 write_handle
                     .send(WriteCmd::Frame(frame))
@@ -263,7 +259,8 @@ where
                 output.send(frame.into()).await?;
             }
             WriteCmd::Reply(tag, response) => {
-                let reply_tx = std::str::from_utf8(&tag).ok()
+                let reply_tx = std::str::from_utf8(&tag)
+                    .ok()
                     .and_then(|tag_str| u64::from_str_radix(tag_str, 16).ok())
                     .and_then(|tag_u64| reply_map.remove(&tag_u64))
                     .ok_or(Error::UnmatchedReply)?;

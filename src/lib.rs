@@ -5,7 +5,7 @@ mod error;
 mod frame;
 mod server;
 
-pub use codecs::{encode_list, Enc as Encoder, Dec as Decoder};
+pub use codecs::{encode_list, Dec as Decoder, Enc as Encoder};
 pub use error::*;
 pub use frame::*;
 pub use server::*;
