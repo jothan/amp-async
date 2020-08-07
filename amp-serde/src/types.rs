@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeTupleVariant, Deserialize, Serialize, Serializer};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Request<Q> {
@@ -88,3 +88,54 @@ impl serde::ser::Error for Error {
 }
 
 impl std::error::Error for Error {}
+
+pub struct AmpList<L>(pub L);
+
+impl<L, I> Serialize for AmpList<L>
+where
+    for<'a> &'a L: IntoIterator<Item = &'a I>,
+    I: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut s = serializer.serialize_tuple_variant(
+            crate::AMP_LIST_COOKIE,
+            0,
+            "shaken, not stirred",
+            0,
+        )?;
+
+        for item in &self.0 {
+            s.serialize_field(&item)?;
+        }
+        s.end()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn amp_list() {
+        #[derive(serde::Serialize)]
+        struct AB {
+            a: u32,
+            b: u64,
+        }
+        let list = crate::AmpList(vec![
+            AB { a: 1, b: 2 },
+            AB { a: 3, b: 4 },
+            AB { a: 5, b: 6 },
+        ]);
+        let bytes = crate::to_bytes(list).unwrap();
+        assert_eq!(
+            bytes,
+            [
+                0, 1, 97, 0, 1, 49, 0, 1, 98, 0, 1, 50, 0, 0, 0, 1, 97, 0, 1, 51, 0, 1, 98, 0, 1,
+                52, 0, 0, 0, 1, 97, 0, 1, 53, 0, 1, 98, 0, 1, 54, 0, 0
+            ]
+            .as_ref()
+        );
+    }
+}
