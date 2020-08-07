@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use serde::Serialize;
@@ -9,7 +8,7 @@ use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 
 use tokio::prelude::*;
-use tokio::sync::{mpsc, oneshot, Barrier};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 
@@ -24,7 +23,7 @@ pub struct DispatchRequest(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
 struct ExpectReply {
     tag: u64,
     reply: oneshot::Sender<Response>,
-    barrier: Arc<tokio::sync::Barrier>,
+    confirm: oneshot::Sender<()>,
 }
 
 type _FrameMaker = Box<dyn FnOnce(Option<Bytes>) -> Result<Vec<u8>, amp_serde::Error> + Send>;
@@ -241,7 +240,7 @@ where
             expect = expect_rx.recv() => {
                 if let Some(expect) = expect {
                     reply_map.insert(expect.tag, expect.reply);
-                    expect.barrier.wait().await;
+                    let _ = expect.confirm.send(());
                 }
             }
             _ = &mut shutdown => {
@@ -313,16 +312,16 @@ where
                 if let Some(reply) = reply {
                     seqno += 1;
 
-                    let barrier = Arc::new(Barrier::new(2));
+                    let (confirm_tx, confirm_rx) = oneshot::channel();
 
                     let expect = ExpectReply {
                         tag: seqno,
                         reply,
-                        barrier: barrier.clone(),
+                        confirm: confirm_tx,
                     };
 
                     expect_tx.send(expect).await?;
-                    barrier.wait().await;
+                    let _ = confirm_rx.await;
 
                     output
                         .send(request.0(Some(format!("{:x}", seqno).into()))?.into())
