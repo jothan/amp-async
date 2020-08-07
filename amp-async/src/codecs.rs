@@ -1,10 +1,9 @@
 use std::convert::TryInto;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio_util::codec::{Decoder, Encoder};
+use bytes::{Buf, Bytes, BytesMut};
+use tokio_util::codec::Decoder;
 
 pub(crate) const AMP_KEY_LIMIT: usize = 0xff;
-pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 
 #[derive(Debug, Default, PartialEq)]
@@ -100,60 +99,6 @@ where
     }
 }
 
-pub struct Enc<D> {
-    _phantom: std::marker::PhantomData<D>,
-}
-
-impl<D> Default for Enc<D> {
-    fn default() -> Self {
-        Self {
-            _phantom: Default::default(),
-        }
-    }
-}
-
-impl<D> Enc<D> {
-    pub fn new() -> Self {
-        Default::default()
-    }
-}
-
-impl<D, K, V> Encoder<D> for Enc<D>
-where
-    D: IntoIterator<Item = (K, V)>,
-    K: AsRef<[u8]>,
-    V: AsRef<[u8]>,
-{
-    type Error = CodecError;
-
-    fn encode(&mut self, item: D, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        for (key, value) in item {
-            let key = key.as_ref();
-            let value = value.as_ref();
-
-            if key.is_empty() {
-                return Err(CodecError::EmptyKey);
-            }
-            if key.len() > AMP_KEY_LIMIT {
-                return Err(CodecError::KeyTooLong);
-            }
-            if value.len() > AMP_VALUE_LIMIT {
-                return Err(CodecError::ValueTooLong);
-            }
-
-            dst.reserve(LENGTH_SIZE * 2 + key.len() + value.len());
-            dst.put_u16(key.len().try_into().unwrap());
-            dst.extend(key);
-            dst.put_u16(value.len().try_into().unwrap());
-            dst.extend(value);
-        }
-        dst.reserve(LENGTH_SIZE);
-        dst.put_u16(0);
-
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 pub enum CodecError {
     IO(std::io::Error),
@@ -236,31 +181,4 @@ mod test {
 
         assert_eq!(buf, WWW_EXAMPLE);
     }
-}
-
-pub fn encode_list<I, O>(input: I, mut output: O) -> Result<(), CodecError>
-where
-    I: IntoIterator,
-    I::Item: AsRef<[u8]>,
-    O: BufMut,
-{
-    let mut length = 0;
-
-    for item in input {
-        let item = item.as_ref();
-        if item.len() > AMP_VALUE_LIMIT {
-            return Err(CodecError::ValueTooLong);
-        }
-
-        let item_length = LENGTH_SIZE + item.len();
-        length += item_length;
-        if length > AMP_VALUE_LIMIT {
-            return Err(CodecError::ValueTooLong);
-        }
-
-        output.put_u16(item.len().try_into().unwrap());
-        output.put_slice(item);
-    }
-
-    Ok(())
 }
