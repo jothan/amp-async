@@ -41,6 +41,7 @@ impl std::fmt::Debug for FrameMaker {
 enum WriteCmd {
     Reply(Bytes),
     Request(FrameMaker, Option<oneshot::Sender<Response>>),
+    Exit,
 }
 
 #[derive(Debug)]
@@ -243,7 +244,10 @@ where
                     expect.barrier.wait().await;
                 }
             }
-            _ = &mut shutdown => break
+            _ = &mut shutdown => {
+                write_tx.send(WriteCmd::Exit).await?;
+                break;
+            }
         }
     }
 
@@ -327,6 +331,7 @@ where
                     output.send(request.0(None)?.into()).await?;
                 }
             }
+            WriteCmd::Exit => break,
         }
     }
 
