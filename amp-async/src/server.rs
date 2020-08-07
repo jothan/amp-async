@@ -154,27 +154,24 @@ impl RequestSender {
 pub struct Handle {
     write_res: JoinHandle<Result<(), Error>>,
     read_res: JoinHandle<Result<(), Error>>,
-    write_loop_handle: mpsc::Sender<WriteCmd>,
-    shutdown: Option<oneshot::Sender<()>>,
+    write_loop_handle: Option<mpsc::Sender<WriteCmd>>,
 }
 
 impl Handle {
-    pub fn shutdown(&mut self) -> Result<(), Error> {
-        if let Some(s) = self.shutdown.take() {
-            // Read loop might already be shutdown.
-            s.send(()).map_err(|_| Error::SendError)?;
-        }
-        Ok(())
+    pub fn shutdown(&mut self) {
+        self.write_loop_handle = None;
     }
 
     pub async fn join(mut self) -> Result<(), Error> {
-        let _ = (&mut self.write_res).await.unwrap()?;
-        let _ = (&mut self.read_res).await.unwrap()?;
+        self.shutdown();
+        self.write_res.await.unwrap()?;
+        self.read_res.await.unwrap()?;
+
         Ok(())
     }
 
-    pub fn request_sender(&self) -> RequestSender {
-        RequestSender(self.write_loop_handle.clone())
+    pub fn request_sender(&self) -> Option<RequestSender> {
+        self.write_loop_handle.as_ref().cloned().map(RequestSender)
     }
 }
 
@@ -186,39 +183,24 @@ where
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(32);
     let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(32);
     let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(32);
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-    let read_res = tokio::spawn(read_loop(
-        input,
-        shutdown_rx,
-        write_tx.clone(),
-        dispatch_tx,
-        expect_rx,
-    ));
+    let read_res = tokio::spawn(read_loop(input, write_tx.clone(), dispatch_tx, expect_rx));
     let write_res = tokio::spawn(write_loop(output, write_rx, expect_tx));
 
     (
         Handle {
             write_res,
             read_res,
-            write_loop_handle: write_tx,
-            shutdown: Some(shutdown_tx),
+            write_loop_handle: Some(write_tx),
         },
         dispatch_rx,
     )
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        let _ = self.shutdown();
-    }
 }
 
 type ReplyMap = HashMap<u64, oneshot::Sender<Response>>;
 
 async fn read_loop<R>(
     input: R,
-    mut shutdown: oneshot::Receiver<()>,
     mut write_tx: mpsc::Sender<WriteCmd>,
     mut dispatch_tx: mpsc::Sender<DispatchRequest>,
     mut expect_rx: mpsc::Receiver<ExpectReply>,
@@ -245,7 +227,6 @@ where
                     expect.barrier.wait().await;
                 }
             }
-            _ = &mut shutdown => break
         }
     }
 

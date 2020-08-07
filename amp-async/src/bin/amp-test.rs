@@ -44,7 +44,7 @@ async fn sum_request(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (handle, dispatch) = serve(stdin(), stdout());
 
-    let mut request = handle.request_sender();
+    let mut request = handle.request_sender().unwrap();
 
     let res = request
         .call_remote("Sum".into(), SumRequest { a: 123, b: 321 })
@@ -69,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await;
 
+    drop(request);
     handle.join().await?;
 
     Ok(())
