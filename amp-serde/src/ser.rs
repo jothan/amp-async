@@ -14,14 +14,14 @@ pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 #[derive(Debug)]
 pub struct Serializer;
 
-pub struct BufferSerializer<'a>(&'a Serializer, Vec<u8>);
+pub struct Compound<'a>(&'a mut Serializer, Vec<u8>);
 
-impl<'a> SerializeSeq for BufferSerializer<'a> {
+impl<'a> SerializeSeq for Compound<'a> {
     type Ok = Vec<u8>;
     type Error = Error;
 
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(self.0)?, &mut self.1)
+        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -29,12 +29,12 @@ impl<'a> SerializeSeq for BufferSerializer<'a> {
     }
 }
 
-impl<'a> SerializeTuple for BufferSerializer<'a> {
+impl<'a> SerializeTuple for Compound<'a> {
     type Ok = Vec<u8>;
     type Error = Error;
 
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(self.0)?, &mut self.1)
+        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -42,12 +42,12 @@ impl<'a> SerializeTuple for BufferSerializer<'a> {
     }
 }
 
-impl<'a> SerializeTupleStruct for BufferSerializer<'a> {
+impl<'a> SerializeTupleStruct for Compound<'a> {
     type Ok = Vec<u8>;
     type Error = Error;
 
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(self.0)?, &mut self.1)
+        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -55,16 +55,16 @@ impl<'a> SerializeTupleStruct for BufferSerializer<'a> {
     }
 }
 
-impl<'a> SerializeMap for BufferSerializer<'a> {
+impl<'a> SerializeMap for Compound<'a> {
     type Ok = Vec<u8>;
     type Error = Error;
 
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Self::Error> {
-        Self::push_key(&key.serialize(self.0)?, &mut self.1)
+        Self::push_key(&key.serialize(&mut *self.0)?, &mut self.1)
     }
 
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(self.0)?, &mut self.1)
+        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
     }
 
     fn end(mut self) -> Result<Self::Ok, Self::Error> {
@@ -73,7 +73,7 @@ impl<'a> SerializeMap for BufferSerializer<'a> {
     }
 }
 
-impl<'a> SerializeStruct for BufferSerializer<'a> {
+impl<'a> SerializeStruct for Compound<'a> {
     type Ok = Vec<u8>;
     type Error = Error;
 
@@ -82,8 +82,8 @@ impl<'a> SerializeStruct for BufferSerializer<'a> {
         key: &'static str,
         value: &T,
     ) -> Result<(), Self::Error> {
-        Self::push_key(&key.serialize(self.0)?, &mut self.1)?;
-        Self::push_value(&value.serialize(self.0)?, &mut self.1)?;
+        Self::push_key(&key.serialize(&mut *self.0)?, &mut self.1)?;
+        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)?;
         Ok(())
     }
 
@@ -93,7 +93,7 @@ impl<'a> SerializeStruct for BufferSerializer<'a> {
     }
 }
 
-impl BufferSerializer<'_> {
+impl Compound<'_> {
     fn push_value(input: &[u8], output: &mut Vec<u8>) -> Result<(), Error> {
         if input.len() > AMP_VALUE_LIMIT {
             return Err(Error::ValueTooLong);
@@ -118,16 +118,16 @@ impl BufferSerializer<'_> {
     }
 }
 
-impl<'a> serde::Serializer for &'a Serializer {
+impl<'a> serde::Serializer for &'a mut Serializer {
     type Ok = Vec<u8>;
     type Error = Error;
 
-    type SerializeSeq = BufferSerializer<'a>;
-    type SerializeTuple = BufferSerializer<'a>;
-    type SerializeTupleStruct = BufferSerializer<'a>;
+    type SerializeSeq = Compound<'a>;
+    type SerializeTuple = Compound<'a>;
+    type SerializeTupleStruct = Compound<'a>;
     type SerializeTupleVariant = Impossible<Self::Ok, Self::Error>;
-    type SerializeMap = BufferSerializer<'a>;
-    type SerializeStruct = BufferSerializer<'a>;
+    type SerializeMap = Compound<'a>;
+    type SerializeStruct = Compound<'a>;
     type SerializeStructVariant = Impossible<Self::Ok, Self::Error>;
 
     fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
@@ -236,7 +236,7 @@ impl<'a> serde::Serializer for &'a Serializer {
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
-        Ok(BufferSerializer(self, Vec::new()))
+        Ok(Compound(self, Vec::new()))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
@@ -262,7 +262,7 @@ impl<'a> serde::Serializer for &'a Serializer {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Error> {
-        Ok(BufferSerializer(self, Vec::new()))
+        Ok(Compound(self, Vec::new()))
     }
 
     fn serialize_struct(
@@ -270,7 +270,7 @@ impl<'a> serde::Serializer for &'a Serializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
-        Ok(BufferSerializer(self, Vec::new()))
+        Ok(Compound(self, Vec::new()))
     }
 
     fn serialize_struct_variant(
@@ -285,5 +285,5 @@ impl<'a> serde::Serializer for &'a Serializer {
 }
 
 pub fn to_bytes<T: Serialize>(value: T) -> Result<Vec<u8>, Error> {
-    value.serialize(&Serializer)
+    value.serialize(&mut Serializer)
 }
