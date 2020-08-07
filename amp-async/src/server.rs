@@ -155,16 +155,23 @@ pub struct Handle {
     write_res: JoinHandle<Result<(), Error>>,
     read_res: JoinHandle<Result<(), Error>>,
     write_loop_handle: Option<mpsc::Sender<WriteCmd>>,
+    shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl Handle {
     pub fn shutdown(&mut self) {
         self.write_loop_handle = None;
+        if let Some(s) = self.shutdown.take() {
+            let _ = s.send(());
+        }
     }
 
     pub async fn join(mut self) -> Result<(), Error> {
-        self.shutdown();
+        self.write_loop_handle = None;
         self.write_res.await.unwrap()?;
+        if let Some(s) = self.shutdown.take() {
+            let _ = s.send(());
+        }
         self.read_res.await.unwrap()?;
 
         Ok(())
@@ -183,8 +190,15 @@ where
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(32);
     let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(32);
     let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(32);
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-    let read_res = tokio::spawn(read_loop(input, write_tx.clone(), dispatch_tx, expect_rx));
+    let read_res = tokio::spawn(read_loop(
+        input,
+        shutdown_rx,
+        write_tx.clone(),
+        dispatch_tx,
+        expect_rx,
+    ));
     let write_res = tokio::spawn(write_loop(output, write_rx, expect_tx));
 
     (
@@ -192,6 +206,7 @@ where
             write_res,
             read_res,
             write_loop_handle: Some(write_tx),
+            shutdown: Some(shutdown_tx),
         },
         dispatch_rx,
     )
@@ -201,6 +216,7 @@ type ReplyMap = HashMap<u64, oneshot::Sender<Response>>;
 
 async fn read_loop<R>(
     input: R,
+    mut shutdown: oneshot::Receiver<()>,
     mut write_tx: mpsc::Sender<WriteCmd>,
     mut dispatch_tx: mpsc::Sender<DispatchRequest>,
     mut expect_rx: mpsc::Receiver<ExpectReply>,
@@ -227,6 +243,7 @@ where
                     expect.barrier.wait().await;
                 }
             }
+            _ = &mut shutdown => break
         }
     }
 
