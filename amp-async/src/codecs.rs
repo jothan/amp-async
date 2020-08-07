@@ -103,10 +103,6 @@ where
 pub enum CodecError {
     IO(std::io::Error),
     KeyTooLong,
-    EmptyKey,
-    ValueTooLong,
-    Serde(String),
-    Unsupported,
 }
 
 impl From<std::io::Error> for CodecError {
