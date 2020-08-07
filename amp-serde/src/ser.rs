@@ -1,4 +1,5 @@
-use std::convert::TryInto;
+use std::convert::TryFrom;
+use std::io::Write;
 
 use bytes::BufMut;
 use serde::ser::{
@@ -11,70 +12,78 @@ use crate::Error;
 pub(crate) const AMP_KEY_LIMIT: usize = 0xff;
 pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 
-#[derive(Debug)]
-pub struct Serializer;
+#[derive(Debug, Default)]
+pub struct Serializer(Vec<u8>);
 
-pub struct Compound<'a>(&'a mut Serializer, Vec<u8>);
+pub struct Compound<'a> {
+    ser: &'a mut Serializer,
+}
+
+impl Compound<'_> {
+    fn new(ser: &mut Serializer) -> Compound<'_> {
+        Compound { ser }
+    }
+}
 
 impl<'a> SerializeSeq for Compound<'a> {
-    type Ok = Vec<u8>;
+    type Ok = ();
     type Error = Error;
 
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
+        self.push_value(value)
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        Ok(self.1)
+        Ok(())
     }
 }
 
 impl<'a> SerializeTuple for Compound<'a> {
-    type Ok = Vec<u8>;
+    type Ok = ();
     type Error = Error;
 
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
+        self.push_value(value)
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        Ok(self.1)
+        Ok(())
     }
 }
 
 impl<'a> SerializeTupleStruct for Compound<'a> {
-    type Ok = Vec<u8>;
+    type Ok = ();
     type Error = Error;
 
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
+        self.push_value(value)
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        Ok(self.1)
+        Ok(())
     }
 }
 
 impl<'a> SerializeMap for Compound<'a> {
-    type Ok = Vec<u8>;
+    type Ok = ();
     type Error = Error;
 
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Self::Error> {
-        Self::push_key(&key.serialize(&mut *self.0)?, &mut self.1)
+        self.push_key(key)
     }
 
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)
+        self.push_value(value)
     }
 
-    fn end(mut self) -> Result<Self::Ok, Self::Error> {
-        self.1.put_u16(0);
-        Ok(self.1)
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        self.ser.0.put_u16(0);
+        Ok(())
     }
 }
 
 impl<'a> SerializeStruct for Compound<'a> {
-    type Ok = Vec<u8>;
+    type Ok = ();
     type Error = Error;
 
     fn serialize_field<T: ?Sized + Serialize>(
@@ -82,44 +91,69 @@ impl<'a> SerializeStruct for Compound<'a> {
         key: &'static str,
         value: &T,
     ) -> Result<(), Self::Error> {
-        Self::push_key(&key.serialize(&mut *self.0)?, &mut self.1)?;
-        Self::push_value(&value.serialize(&mut *self.0)?, &mut self.1)?;
+        self.push_key(key)?;
+        self.push_value(value)?;
         Ok(())
     }
 
-    fn end(mut self) -> Result<Self::Ok, Self::Error> {
-        self.1.put_u16(0);
-        Ok(self.1)
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        self.ser.0.put_u16(0);
+        Ok(())
     }
 }
 
 impl Compound<'_> {
-    fn push_value(input: &[u8], output: &mut Vec<u8>) -> Result<(), Error> {
-        if input.len() > AMP_VALUE_LIMIT {
-            return Err(Error::ValueTooLong);
-        }
-
-        output.put_u16(input.len().try_into().unwrap());
-        output.extend_from_slice(input);
-        Ok(())
+    fn push_value<T: Serialize + ?Sized>(&mut self, input: &T) -> Result<(), Error> {
+        let length_offset = self.ser.prep_len();
+        input.serialize(&mut *self.ser)?;
+        self.ser.write_len(length_offset, false)
     }
 
-    fn push_key(input: &[u8], output: &mut Vec<u8>) -> Result<(), Error> {
-        if input.is_empty() {
-            return Err(Error::EmptyKey);
-        }
-        if input.len() > AMP_KEY_LIMIT {
-            return Err(Error::KeyTooLong);
-        }
+    fn push_key<T: Serialize + ?Sized>(&mut self, input: &T) -> Result<(), Error> {
+        let length_offset = self.ser.prep_len();
+        input.serialize(&mut *self.ser)?;
+        self.ser.write_len(length_offset, true)
+    }
+}
 
-        output.put_u16(input.len().try_into().unwrap());
-        output.extend_from_slice(input);
+impl Serializer {
+    fn prep_len(&mut self) -> usize {
+        let length_offset = self.0.len();
+
+        // Dummy value
+        self.0.put_u16(0x55aa);
+        length_offset
+    }
+
+    fn write_len(&mut self, length_offset: usize, key: bool) -> Result<(), Error> {
+        assert!(self.0.len() >= length_offset + 2);
+        let length = self.0.len() - length_offset - 2;
+
+        if key {
+            if length == 0 {
+                return Err(Error::EmptyKey);
+            }
+            if length > AMP_KEY_LIMIT {
+                return Err(Error::KeyTooLong);
+            }
+        } else if length > AMP_VALUE_LIMIT {
+            return Err(Error::ValueTooLong);
+        }
+        let length = u16::try_from(length).unwrap().to_be_bytes();
+        self.0[length_offset..length_offset + 2].copy_from_slice(length.as_ref());
+
         Ok(())
     }
 }
 
+impl From<Serializer> for Vec<u8> {
+    fn from(input: Serializer) -> Vec<u8> {
+        input.0
+    }
+}
+
 impl<'a> serde::Serializer for &'a mut Serializer {
-    type Ok = Vec<u8>;
+    type Ok = ();
     type Error = Error;
 
     type SerializeSeq = Compound<'a>;
@@ -132,10 +166,11 @@ impl<'a> serde::Serializer for &'a mut Serializer {
 
     fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
         if v {
-            Ok(b"True".to_vec())
+            self.0.extend_from_slice(b"True");
         } else {
-            Ok(b"False".to_vec())
+            self.0.extend_from_slice(b"False");
         }
+        Ok(())
     }
 
     fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
@@ -151,7 +186,8 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
-        Ok(format!("{}", v).into())
+        write!(self.0, "{}", v)?;
+        Ok(())
     }
 
     fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
@@ -167,15 +203,18 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
-        Ok(format!("{}", v).into())
+        write!(self.0, "{}", v)?;
+        Ok(())
     }
 
     fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
-        Ok(format!("{}", v).into())
+        write!(self.0, "{}", v)?;
+        Ok(())
     }
 
     fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
-        Ok(format!("{}", v).into())
+        write!(self.0, "{}", v)?;
+        Ok(())
     }
 
     fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error> {
@@ -185,15 +224,17 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
-        Ok(v.as_bytes().into())
+        self.0.extend_from_slice(v.as_bytes());
+        Ok(())
     }
 
     fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
-        Ok(value.into())
+        self.0.extend_from_slice(value);
+        Ok(())
     }
 
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
-        Err(Error::Unsupported)
+        Ok(())
     }
 
     fn serialize_some<T: ?Sized + serde::Serialize>(self, v: &T) -> Result<Self::Ok, Self::Error> {
@@ -201,11 +242,11 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
-        Err(Error::Unsupported)
+        Ok(())
     }
 
     fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
-        Err(Error::Unsupported)
+        Ok(())
     }
 
     fn serialize_unit_variant(
@@ -236,7 +277,7 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
-        Ok(Compound(self, Vec::new()))
+        Ok(Compound::new(self))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
@@ -262,7 +303,7 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Error> {
-        Ok(Compound(self, Vec::new()))
+        Ok(Compound::new(self))
     }
 
     fn serialize_struct(
@@ -270,7 +311,7 @@ impl<'a> serde::Serializer for &'a mut Serializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
-        Ok(Compound(self, Vec::new()))
+        Ok(Compound::new(self))
     }
 
     fn serialize_struct_variant(
@@ -285,5 +326,7 @@ impl<'a> serde::Serializer for &'a mut Serializer {
 }
 
 pub fn to_bytes<T: Serialize>(value: T) -> Result<Vec<u8>, Error> {
-    value.serialize(&mut Serializer)
+    let mut serializer: Serializer = Default::default();
+    value.serialize(&mut serializer)?;
+    Ok(serializer.into())
 }
