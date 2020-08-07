@@ -4,6 +4,7 @@ use std::io::Write;
 use bytes::BufMut;
 use serde::ser::{
     Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeTuple, SerializeTupleStruct,
+    SerializeTupleVariant,
 };
 use serde::Serialize;
 
@@ -57,6 +58,20 @@ impl<'a> SerializeTupleStruct for Compound<'a> {
 
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
         self.push_value(value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+impl<'a> SerializeTupleVariant for Compound<'a> {
+    type Ok = ();
+    type Error = Error;
+
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+        // Encode with no separator
+        value.serialize(&mut *self.ser)
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -159,7 +174,7 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     type SerializeSeq = Compound<'a>;
     type SerializeTuple = Compound<'a>;
     type SerializeTupleStruct = Compound<'a>;
-    type SerializeTupleVariant = Impossible<Self::Ok, Self::Error>;
+    type SerializeTupleVariant = Compound<'a>;
     type SerializeMap = Compound<'a>;
     type SerializeStruct = Compound<'a>;
     type SerializeStructVariant = Impossible<Self::Ok, Self::Error>;
@@ -304,12 +319,17 @@ impl<'a> serde::Serializer for &'a mut Serializer {
 
     fn serialize_tuple_variant(
         self,
-        _name: &'static str,
+        name: &'static str,
         _idx: u32,
         _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant, Error> {
-        Err(Error::Unsupported)
+        // Ugly hack for the AmpList special case.
+        if name == crate::AMP_LIST_COOKIE {
+            Ok(Compound::new(self))
+        } else {
+            Err(Error::Unsupported)
+        }
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Error> {
@@ -332,6 +352,10 @@ impl<'a> serde::Serializer for &'a mut Serializer {
         _len: usize,
     ) -> Result<Self::SerializeStructVariant, Error> {
         Err(Error::Unsupported)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 
