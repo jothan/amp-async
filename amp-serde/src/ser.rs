@@ -208,12 +208,22 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
-        write!(self.0, "{}", v)?;
-        Ok(())
+        self.serialize_f64(v.into())
     }
 
     fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
-        write!(self.0, "{}", v)?;
+        if v.is_nan() {
+            self.0.extend_from_slice(b"nan");
+        } else if v.is_infinite() {
+            if v.is_sign_positive() {
+                self.0.extend_from_slice(b"inf");
+            } else {
+                self.0.extend_from_slice(b"-inf");
+            }
+        } else {
+            write!(self.0, "{}", v)?;
+        }
+
         Ok(())
     }
 
