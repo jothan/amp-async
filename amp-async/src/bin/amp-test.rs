@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{stdin, stdout};
 
 use amp_async::{serve, RawFrame, ReplyTicket};
+use amp_serde::AmpList;
 
 fn parse_int(input: Option<Bytes>) -> Option<i64> {
     input
@@ -23,6 +24,16 @@ struct SumRequest {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct SumResponse {
     total: i64,
+}
+
+#[derive(Serialize)]
+struct SumManyRequest {
+    ops: AmpList<SumRequest>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SumManyResponse {
+    totals: AmpList<SumResponse>,
 }
 
 async fn sum_request(
@@ -55,6 +66,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .call_remote("Sum".into(), SumRequest { a: 777, b: 777 })
         .await?;
     eprintln!("res2: {:?}", res);
+
+    let req = SumManyRequest {
+        ops: AmpList(vec![
+            SumRequest { a: 10, b: 1 },
+            SumRequest { a: 20, b: 2 },
+            SumRequest { a: 30, b: 3 },
+        ]),
+    };
+    let res: SumManyResponse = request.call_remote("SumMany".into(), req).await?;
+    eprintln!("res3: {:?}", res.totals.0);
 
     dispatch
         .for_each_concurrent(10, |request| async move {

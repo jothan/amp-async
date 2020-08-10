@@ -10,6 +10,12 @@ class Sum(amp.Command):
                  (b'b', amp.Integer())]
     response = [(b'total', amp.Integer())]
 
+class SumMany(amp.Command):
+    arguments = [(b'ops', amp.AmpList([(b'a', amp.Integer()),
+                                       (b'b', amp.Integer())]))]
+    response = [(b'totals', amp.AmpList([(b'total', amp.Integer())]))]
+
+
 class Responder(amp.AMP):
     def makeConnection(self, transport):
         transport.getPeer = lambda: 'local'
@@ -21,6 +27,11 @@ class Responder(amp.AMP):
         total = a + b
         print(f'Did a sum: {a} + {b} = {total}')
         return {'total': total}
+
+    @SumMany.responder
+    def do_sums(self, ops):
+        totals = [{'total': o['a'] + o['b']} for o in ops]
+        return {'totals': totals}
     
 RUST_PATH = 'target/debug/amp-test'
 
