@@ -13,6 +13,7 @@ use crate::{Error, Result, AMP_KEY_LIMIT, AMP_LENGTH_SIZE, AMP_VALUE_LIMIT};
 #[derive(Debug, Default)]
 pub struct Serializer(Vec<u8>);
 
+#[doc(hidden)]
 pub struct Compound<'a> {
     ser: &'a mut Serializer,
 }
