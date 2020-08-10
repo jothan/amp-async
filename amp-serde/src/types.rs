@@ -93,8 +93,8 @@ pub struct AmpList<L>(pub L);
 
 impl<L, I> Serialize for AmpList<L>
 where
-    for<'a> &'a L: IntoIterator<Item = &'a I>,
-    I: Serialize + ?Sized,
+    for<'a> &'a L: IntoIterator<Item = I>,
+    I: Serialize,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
