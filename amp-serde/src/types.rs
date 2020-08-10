@@ -121,6 +121,18 @@ impl std::error::Error for Error {}
 
 pub struct AmpList<I>(pub Vec<I>);
 
+impl <I: Clone> Clone for AmpList<I> {
+    fn clone(&self) -> Self {
+        AmpList(self.0.clone())
+    }
+}
+
+impl <I: fmt::Debug> fmt::Debug for AmpList<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), fmt::Error> {
+        write!(f, "AmpList({:?})", self.0)
+    }
+}
+
 impl<I> Serialize for AmpList<I>
 where
     I: Serialize,
