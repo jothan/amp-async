@@ -1,7 +1,12 @@
-use std::fmt::Display;
+use std::fmt::{self, Display};
+use std::marker::PhantomData;
 
 use bytes::Bytes;
-use serde::{ser::SerializeTupleVariant, Deserialize, Serialize, Serializer};
+use serde::{
+    de::{SeqAccess, Visitor},
+    ser::SerializeTupleVariant,
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Request<Q> {
@@ -89,12 +94,11 @@ impl serde::ser::Error for Error {
 
 impl std::error::Error for Error {}
 
-pub struct AmpList<L>(pub L);
+pub struct AmpList<I>(pub Vec<I>);
 
-impl<L, I> Serialize for AmpList<L>
+impl<I> Serialize for AmpList<I>
 where
-    for<'a> &'a L: IntoIterator<Item = &'a I>,
-    I: Serialize + ?Sized,
+    I: Serialize,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -108,34 +112,93 @@ where
         )?;
 
         for item in &self.0 {
-            s.serialize_field(&item)?;
+            s.serialize_field(item)?;
         }
         s.end()
     }
 }
 
+impl<'de, I> Deserialize<'de> for AmpList<I>
+where
+    I: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ListVisitor<I>(PhantomData<I>);
+        impl<'de, I> Visitor<'de> for ListVisitor<I>
+        where
+            I: Deserialize<'de>,
+        {
+            type Value = Vec<I>;
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a list of dictionaries")
+            }
+
+            fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut out = Vec::new();
+
+                while let Some(item) = access.next_element::<I>()? {
+                    out.push(item)
+                }
+
+                Ok(out)
+            }
+        }
+        Ok(AmpList(deserializer.deserialize_tuple_struct(
+            crate::AMP_LIST_COOKIE,
+            0,
+            ListVisitor(PhantomData),
+        )?))
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use crate::{from_bytes, to_bytes, AmpList};
+    use serde::{Deserialize, Serialize};
+
+    const LIST_ENC: [u8; 42] = [
+        0, 1, 97, 0, 1, 49, 0, 1, 98, 0, 1, 50, 0, 0, 0, 1, 97, 0, 1, 51, 0, 1, 98, 0, 1, 52, 0, 0,
+        0, 1, 97, 0, 1, 53, 0, 1, 98, 0, 1, 54, 0, 0,
+    ];
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct AB {
+        a: u32,
+        b: u64,
+    }
+
     #[test]
-    fn amp_list() {
-        #[derive(serde::Serialize)]
-        struct AB {
-            a: u32,
-            b: u64,
-        }
-        let list = crate::AmpList(vec![
+    fn amp_list_enc() {
+        let list = AmpList(vec![
             AB { a: 1, b: 2 },
             AB { a: 3, b: 4 },
             AB { a: 5, b: 6 },
         ]);
-        let bytes = crate::to_bytes(list).unwrap();
+        let bytes = to_bytes(list).unwrap();
+        assert_eq!(bytes, LIST_ENC.as_ref());
+    }
+
+    #[test]
+    fn amp_list_dec() {
+        let list: AmpList<AB> = from_bytes(&LIST_ENC).unwrap();
+
         assert_eq!(
-            bytes,
-            [
-                0, 1, 97, 0, 1, 49, 0, 1, 98, 0, 1, 50, 0, 0, 0, 1, 97, 0, 1, 51, 0, 1, 98, 0, 1,
-                52, 0, 0, 0, 1, 97, 0, 1, 53, 0, 1, 98, 0, 1, 54, 0, 0
-            ]
-            .as_ref()
+            list.0,
+            vec![AB { a: 1, b: 2 }, AB { a: 3, b: 4 }, AB { a: 5, b: 6 }]
         );
+    }
+
+    #[test]
+    fn trailling_dicts() {
+        assert_eq!(
+            from_bytes::<std::collections::BTreeMap<Vec<u8>, Vec<u8>>>(&LIST_ENC),
+            Err(crate::de::Error::RemainingBytes)
+        )
     }
 }
