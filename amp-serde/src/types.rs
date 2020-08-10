@@ -36,8 +36,8 @@ pub struct ErrorResponse {
     pub description: String,
 }
 
-impl<R> From<Response<R>> for Result<OkResponse<R>, ErrorResponse> {
-    fn from(value: Response<R>) -> Result<OkResponse<R>, ErrorResponse> {
+impl<R> From<Response<R>> for std::result::Result<OkResponse<R>, ErrorResponse> {
+    fn from(value: Response<R>) -> std::result::Result<OkResponse<R>, ErrorResponse> {
         match value {
             Response::Ok(v) => Ok(v),
             Response::Err(e) => Err(e),
@@ -45,8 +45,8 @@ impl<R> From<Response<R>> for Result<OkResponse<R>, ErrorResponse> {
     }
 }
 
-impl<R> From<Result<OkResponse<R>, ErrorResponse>> for Response<R> {
-    fn from(value: Result<OkResponse<R>, ErrorResponse>) -> Response<R> {
+impl<R> From<std::result::Result<OkResponse<R>, ErrorResponse>> for Response<R> {
+    fn from(value: std::result::Result<OkResponse<R>, ErrorResponse>) -> Response<R> {
         match value {
             Ok(v) => Response::Ok(v),
             Err(e) => Response::Err(e),
@@ -63,13 +63,29 @@ pub enum Response<R> {
 
 #[derive(Debug)]
 pub enum Error {
+    // Serialization errors
     IO(std::io::Error),
     KeyTooLong,
     EmptyKey,
     ValueTooLong,
-    Serde(String),
+
+    // Deserialization errors
+    ExpectedBool,
+    RemainingBytes,
+    ExpectedInteger,
+    ExpectedFloat,
+    ExpectedUtf8,
+    ExpectedChar,
+    ExpectedMapKey,
+    ExpectedMapValue,
+    ExpectedSeqLength,
+    ExpectedSeqValue,
+
+    Custom(String),
     Unsupported,
 }
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
@@ -78,7 +94,7 @@ impl From<std::io::Error> for Error {
 }
 
 impl Display for Error {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         write!(fmt, "{:?}", self)
     }
 }
@@ -88,7 +104,16 @@ impl serde::ser::Error for Error {
     where
         T: Display,
     {
-        Error::Serde(msg.to_string())
+        Error::Custom(msg.to_string())
+    }
+}
+
+impl serde::de::Error for Error {
+    fn custom<T>(msg: T) -> Error
+    where
+        T: Display,
+    {
+        Error::Custom(msg.to_string())
     }
 }
 
@@ -100,7 +125,7 @@ impl<I> Serialize for AmpList<I>
 where
     I: Serialize,
 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -122,7 +147,7 @@ impl<'de, I> Deserialize<'de> for AmpList<I>
 where
     I: Deserialize<'de>,
 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -136,7 +161,7 @@ where
                 formatter.write_str("a list of dictionaries")
             }
 
-            fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            fn visit_seq<A>(self, mut access: A) -> std::result::Result<Self::Value, A::Error>
             where
                 A: SeqAccess<'de>,
             {
@@ -159,7 +184,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::{from_bytes, to_bytes, AmpList};
+    use crate::{from_bytes, to_bytes, AmpList, Error};
     use serde::{Deserialize, Serialize};
 
     const LIST_ENC: [u8; 42] = [
@@ -196,9 +221,9 @@ mod test {
 
     #[test]
     fn trailling_dicts() {
-        assert_eq!(
-            from_bytes::<std::collections::BTreeMap<Vec<u8>, Vec<u8>>>(&LIST_ENC),
-            Err(crate::de::Error::RemainingBytes)
-        )
+        match from_bytes::<std::collections::BTreeMap<Vec<u8>, Vec<u8>>>(&LIST_ENC) {
+            Err(Error::RemainingBytes) => (),
+            _ => unreachable!(),
+        }
     }
 }
