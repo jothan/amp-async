@@ -8,10 +8,7 @@ use serde::ser::{
 };
 use serde::Serialize;
 
-use crate::Error;
-
-pub(crate) const AMP_KEY_LIMIT: usize = 0xff;
-pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
+use crate::{Error, AMP_KEY_LIMIT, AMP_LENGTH_SIZE, AMP_VALUE_LIMIT};
 
 #[derive(Debug, Default)]
 pub struct Serializer(Vec<u8>);
@@ -141,8 +138,8 @@ impl Serializer {
     }
 
     fn write_len(&mut self, length_offset: usize, key: bool) -> Result<(), Error> {
-        assert!(self.0.len() >= length_offset + 2);
-        let length = self.0.len() - length_offset - 2;
+        assert!(self.0.len() >= length_offset + AMP_LENGTH_SIZE);
+        let length = self.0.len() - length_offset - AMP_LENGTH_SIZE;
 
         if key {
             if length == 0 {
@@ -155,7 +152,7 @@ impl Serializer {
             return Err(Error::ValueTooLong);
         }
         let length = u16::try_from(length).unwrap().to_be_bytes();
-        self.0[length_offset..length_offset + 2].copy_from_slice(length.as_ref());
+        self.0[length_offset..length_offset + AMP_LENGTH_SIZE].copy_from_slice(length.as_ref());
 
         Ok(())
     }
@@ -355,7 +352,8 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn is_human_readable(&self) -> bool {
-        false
+        // Python abuses strings
+        true
     }
 }
 

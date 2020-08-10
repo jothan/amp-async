@@ -96,10 +96,7 @@ impl Drop for ReplyTicket {
 
             // Can't wait for poll_drop
             tokio::spawn(async move {
-                write_handle
-                    .send(WriteCmd::Reply(reply.into()))
-                    .await
-                    .expect("error on drop")
+                let _ = write_handle.send(WriteCmd::Reply(reply.into())).await;
             });
         }
     }
