@@ -5,6 +5,7 @@ mod error;
 mod frame;
 mod server;
 
+pub use amp_serde::AmpList;
 pub use codecs::Dec as Decoder;
 pub use error::*;
 pub use frame::*;

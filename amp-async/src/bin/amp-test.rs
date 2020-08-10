@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use tokio::io::{stdin, stdout};
 
-use amp_async::{serve, RawFrame, ReplyTicket};
-use amp_serde::AmpList;
+use amp_async::{serve, AmpList, RawFrame, ReplyTicket};
 
 fn parse_int(input: Option<Bytes>) -> Option<i64> {
     input
