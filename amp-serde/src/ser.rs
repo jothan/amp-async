@@ -1,6 +1,8 @@
 use std::convert::TryFrom;
 use std::io::Write;
 
+const INITIAL_CAPACITY: usize = 256;
+
 use bytes::BufMut;
 use serde::ser::{
     Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeTuple, SerializeTupleStruct,
@@ -10,8 +12,14 @@ use serde::Serialize;
 
 use crate::{Error, Result, AMP_KEY_LIMIT, AMP_LENGTH_SIZE, AMP_VALUE_LIMIT};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Serializer(Vec<u8>);
+
+impl Default for Serializer {
+    fn default() -> Serializer {
+        Serializer(Vec::with_capacity(INITIAL_CAPACITY))
+    }
+}
 
 #[doc(hidden)]
 pub struct Compound<'a> {

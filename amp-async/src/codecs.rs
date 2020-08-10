@@ -9,7 +9,7 @@ const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
 #[derive(Debug, Default, PartialEq)]
 pub struct Dec<D = Vec<(Bytes, Bytes)>> {
     state: State,
-    key: Vec<u8>,
+    key: Bytes,
     frame: D,
 }
 
@@ -53,7 +53,7 @@ where
 
 impl<D> Decoder for Dec<D>
 where
-    D: Default + Extend<(Vec<u8>, Bytes)>,
+    D: Default + Extend<(Bytes, Bytes)>,
 {
     type Error = CodecError;
     type Item = D;
@@ -75,7 +75,7 @@ where
                     } else {
                         match Self::read_key(length, buf)? {
                             Some(key) => {
-                                self.key = key.to_vec();
+                                self.key = key;
                                 self.state = State::Value;
                             }
                             None => {

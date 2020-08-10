@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 
 use bytes::Bytes;
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
@@ -106,11 +106,11 @@ impl Drop for ReplyTicket {
 pub struct RequestSender(mpsc::Sender<WriteCmd>);
 
 impl RequestSender {
-    pub async fn call_remote<Q: Serialize + Send + 'static>(
+    pub async fn call_remote<Q: Serialize + Send + 'static, R: DeserializeOwned>(
         &mut self,
         command: String,
         request: Q,
-    ) -> Result<RawFrame, Error> {
+    ) -> Result<R, Error> {
         let (tx, rx) = oneshot::channel();
 
         let frame = FrameMaker(Box::new(move |tag| {
@@ -123,10 +123,16 @@ impl RequestSender {
 
         self.0.send(WriteCmd::Request(frame, Some(tx))).await?;
 
-        rx.await?.map_err(|err| Error::Remote {
+        let raw_frame = rx.await?.map_err(|err| Error::Remote {
             code: err.code,
             description: err.description,
-        })
+        })?;
+
+        // FIXME: do this without an intermediary copy when serde gets
+        // good at deserializing untagged enums with flattened structs.
+        amp_serde::to_bytes(raw_frame)
+            .and_then(|b| amp_serde::from_bytes(&b))
+            .map_err(Into::into)
     }
 
     pub async fn call_remote_noreply<Q: Serialize + Send + 'static>(
