@@ -76,7 +76,7 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         // Sadly, only possible sane behavior.
-        self.deserialize_bytes(visitor);
+        self.deserialize_bytes(visitor)
     }
 
     fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
