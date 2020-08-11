@@ -17,6 +17,8 @@ use amp_serde::{ErrorResponse, OkResponse, Request};
 use crate::frame::Response;
 use crate::{Decoder, Error, Frame, RawFrame};
 
+const QUEUE_DEPTH: usize = 32;
+
 #[derive(Debug)]
 pub struct DispatchRequest(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
 
@@ -190,9 +192,9 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(32);
-    let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(32);
-    let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(32);
+    let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(QUEUE_DEPTH);
+    let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(QUEUE_DEPTH);
+    let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(QUEUE_DEPTH);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
     let read_res = tokio::spawn(read_loop(
