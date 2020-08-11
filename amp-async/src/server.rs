@@ -38,6 +38,7 @@ struct LoopState {
     write_done: AtomicBool,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum State {
     Connected,
     Closing,
