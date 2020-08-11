@@ -1,3 +1,6 @@
+// Clippy does not like using Bytes as keys.
+#![allow(clippy::mutable_key_type)]
+
 use bytes::Bytes;
 
 use futures::stream::StreamExt;
