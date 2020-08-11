@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
@@ -26,6 +30,18 @@ struct ExpectReply {
     tag: u64,
     reply: oneshot::Sender<Response>,
     confirm: oneshot::Sender<()>,
+}
+
+#[derive(Default)]
+struct LoopState {
+    read_done: AtomicBool,
+    write_done: AtomicBool,
+}
+
+pub enum State {
+    Connected,
+    Closing,
+    Closed,
 }
 
 type _FrameMaker = Box<dyn FnOnce(Option<Bytes>) -> Result<Vec<u8>, amp_serde::Error> + Send>;
@@ -157,6 +173,7 @@ impl RequestSender {
 }
 
 pub struct Handle {
+    state: Arc<LoopState>,
     write_res: JoinHandle<Result<(), Error>>,
     read_res: JoinHandle<Result<(), Error>>,
     write_loop_handle: Option<mpsc::Sender<WriteCmd>>,
@@ -185,6 +202,19 @@ impl Handle {
     pub fn request_sender(&self) -> Option<RequestSender> {
         self.write_loop_handle.as_ref().cloned().map(RequestSender)
     }
+
+    pub fn state(&self) -> State {
+        let read_done = self.state.read_done.load(Ordering::SeqCst);
+        let write_done = self.state.write_done.load(Ordering::SeqCst);
+
+        if read_done && write_done {
+            State::Closed
+        } else if read_done || write_done {
+            State::Closing
+        } else {
+            State::Connected
+        }
+    }
 }
 
 pub fn serve<R, W>(input: R, output: W) -> (Handle, mpsc::Receiver<DispatchRequest>)
@@ -192,22 +222,31 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let state = Arc::new(LoopState::default());
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(QUEUE_DEPTH);
     let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(QUEUE_DEPTH);
     let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(QUEUE_DEPTH);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-    let read_res = tokio::spawn(read_loop(
-        input,
-        shutdown_rx,
-        write_tx.clone(),
-        dispatch_tx,
-        expect_rx,
-    ));
-    let write_res = tokio::spawn(write_loop(output, write_rx, expect_tx));
+    let read_state = state.clone();
+    let write_tx2 = write_tx.clone();
+    let read_res = tokio::spawn(async move {
+        let res = read_loop(input, shutdown_rx, write_tx2, dispatch_tx, expect_rx).await;
+
+        read_state.read_done.store(true, Ordering::SeqCst);
+        res
+    });
+
+    let write_state = state.clone();
+    let write_res = tokio::spawn(async move {
+        let res = write_loop(output, write_rx, expect_tx).await;
+        write_state.write_done.store(true, Ordering::SeqCst);
+        res
+    });
 
     (
         Handle {
+            state,
             write_res,
             read_res,
             write_loop_handle: Some(write_tx),
