@@ -286,6 +286,8 @@ where
                 if let Some(expect) = expect {
                     reply_map.insert(expect.tag, expect.reply);
                     let _ = expect.confirm.send(());
+                } else {
+                    break;
                 }
             }
             _ = &mut shutdown => {
