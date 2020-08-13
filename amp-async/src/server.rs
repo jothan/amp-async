@@ -354,7 +354,7 @@ where
                 output.send(frame).await?;
             }
             WriteCmd::Request(request, reply) => {
-                if let Some(reply) = reply {
+                let tag = if let Some(reply) = reply {
                     seqno += 1;
 
                     let (confirm_tx, confirm_rx) = oneshot::channel();
@@ -368,12 +368,12 @@ where
                     expect_tx.send(expect).await?;
                     let _ = confirm_rx.await;
 
-                    output
-                        .send(request.0(Some(format!("{:x}", seqno).into()))?.into())
-                        .await?;
+                    Some(format!("{:x}", seqno).into())
                 } else {
-                    output.send(request.0(None)?.into()).await?;
-                }
+                    None
+                };
+
+                output.send(request.0(tag)?.into()).await?;
             }
             WriteCmd::Exit => break,
         }
