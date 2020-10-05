@@ -304,7 +304,7 @@ where
                 .and_then(|tag_u64| reply_map.remove(&tag_u64))
                 .ok_or(Error::UnmatchedReply)?;
 
-            reply_tx.send(response).map_err(|_| Error::SendError)?;
+            reply_tx.send(response).map_err(|_| Error::InternalError)?;
             Ok(None)
         }
     }

@@ -99,25 +99,13 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CodecError {
-    IO(std::io::Error),
+    #[error("IO error")]
+    IO(#[from] std::io::Error),
+    #[error("Key too long")]
     KeyTooLong,
 }
-
-impl From<std::io::Error> for CodecError {
-    fn from(err: std::io::Error) -> Self {
-        Self::IO(err)
-    }
-}
-
-impl std::fmt::Display for CodecError {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        write!(fmt, "{:?}", self)
-    }
-}
-
-impl std::error::Error for CodecError {}
 
 #[cfg(test)]
 mod test {

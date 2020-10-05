@@ -1,20 +1,29 @@
 use crate::codecs::CodecError;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("Ambiguous frame type")]
     ConfusedFrame,
+    #[error("This error frame is missing the code or description")]
     IncompleteErrorFrame,
+    #[error("Received a reply to a non-existent request")]
     UnmatchedReply,
-    RecvError,
-    SendError,
-    Codec(CodecError),
-    Serde(amp_serde::Error),
+    #[error("Internal channel error")]
+    InternalError,
+    #[error("Codec error: {0}")]
+    Codec(#[from] CodecError),
+    #[error("Serde error: {0}")]
+    Serde(#[from] amp_serde::Error),
+    #[error("Remote error: {0}")]
     Remote(RemoteError),
-    IO(std::io::Error),
-    InvalidUtf8(std::str::Utf8Error),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error("Invalid UTF-8: {0}")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
 }
 
-#[derive(Clone, Debug)]
+#[derive(thiserror::Error, Clone, Debug)]
+#[error("{code:?}: {description:?}")]
 pub struct RemoteError {
     pub(crate) code: String,
     pub(crate) description: String,
@@ -33,46 +42,14 @@ impl RemoteError {
     }
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        write!(fmt, "{:?}", self)
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<CodecError> for Error {
-    fn from(error: CodecError) -> Self {
-        Self::Codec(error)
-    }
-}
-
 impl From<tokio::sync::oneshot::error::RecvError> for Error {
     fn from(_error: tokio::sync::oneshot::error::RecvError) -> Self {
-        Self::RecvError
+        Self::InternalError
     }
 }
 
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(_error: tokio::sync::mpsc::error::SendError<T>) -> Self {
-        Self::SendError
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(error: std::io::Error) -> Self {
-        Self::IO(error)
-    }
-}
-
-impl From<amp_serde::Error> for Error {
-    fn from(error: amp_serde::Error) -> Self {
-        Self::Serde(error)
-    }
-}
-
-impl From<std::str::Utf8Error> for Error {
-    fn from(error: std::str::Utf8Error) -> Self {
-        Self::InvalidUtf8(error)
+        Self::InternalError
     }
 }
