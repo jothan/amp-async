@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from twisted.internet.defer import inlineCallbacks, DeferredList
+from twisted.internet.defer import inlineCallbacks, DeferredList, Deferred
 from twisted.internet.endpoints import ProcessEndpoint
 from twisted.internet.protocol import Factory
 from twisted.protocols import amp
@@ -49,6 +49,12 @@ def start():
 
     dl = yield DeferredList([call1, call2])
     print(dl)
+
+    d = Deferred()
+    reactor.callLater(.01, d.callback, None)
+    # Add small delay because it is hard to check when the request fd
+    # has been closed.
+    yield d
 
     reactor.stop()
 

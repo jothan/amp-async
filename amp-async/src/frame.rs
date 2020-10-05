@@ -3,16 +3,10 @@ use std::convert::TryFrom;
 
 use bytes::Bytes;
 
-use crate::Error;
+use crate::{Error, RemoteError};
 
 pub type RawFrame = HashMap<Bytes, Bytes>;
-pub(crate) type Response = Result<RawFrame, WireError>;
-
-#[derive(Debug, Clone)]
-pub(crate) struct WireError {
-    pub(crate) code: Bytes,
-    pub(crate) description: Bytes,
-}
+pub(crate) type Response = Result<RawFrame, RemoteError>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Frame {
@@ -67,7 +61,10 @@ impl TryFrom<RawFrame> for Frame {
 
             Ok(Frame::Response {
                 tag,
-                response: Err(WireError { code, description }),
+                response: Err(RemoteError::new(
+                    Some(std::str::from_utf8(&code)?),
+                    Some(std::str::from_utf8(&description)?),
+                )),
             })
         } else {
             Err(Error::ConfusedFrame)

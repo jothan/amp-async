@@ -400,19 +400,19 @@ impl<'de, 'a> MapAccess<'de> for &'a mut Deserializer<'de> {
 
         self.input = &self.input[AMP_LENGTH_SIZE..];
 
-        if self.input.len() >= length {
-            let (value, rest) = self.input.split_at(length);
-            self.input = rest;
-
-            let mut sub = Deserializer { input: value };
-            let res = seed.deserialize(&mut sub);
-            if !sub.input.is_empty() {
-                return Err(Error::RemainingBytes);
-            }
-            res
-        } else {
-            Err(Error::ExpectedMapValue)
+        if self.input.len() < length {
+            return Err(Error::ExpectedMapValue);
         }
+
+        let (value, rest) = self.input.split_at(length);
+        self.input = rest;
+
+        let mut sub = Deserializer { input: value };
+        let res = seed.deserialize(&mut sub);
+        if !sub.input.is_empty() {
+            return Err(Error::RemainingBytes);
+        }
+        res
     }
 }
 

@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
 
 use futures::sink::SinkExt;
-use futures::stream::StreamExt;
+use futures::stream::{FuturesUnordered, StreamExt, TryStreamExt};
+use futures::FutureExt;
 
+use async_trait::async_trait;
 use tokio::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -16,12 +19,22 @@ use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 use amp_serde::{ErrorResponse, OkResponse, Request};
 
 use crate::frame::Response;
-use crate::{Decoder, Error, Frame, RawFrame};
+use crate::{Decoder, Error, Frame, RawFrame, RemoteError};
 
 const QUEUE_DEPTH: usize = 32;
 
-#[derive(Debug)]
-pub struct DispatchRequest(pub Bytes, pub RawFrame, pub Option<ReplyTicket>);
+#[async_trait]
+pub trait Dispatcher: Send + Sync + 'static {
+    async fn dispatch(&self, _command: &str, _frame: RawFrame) -> Result<RawFrame, RemoteError> {
+        Err(RemoteError::new(Some("UNHANDLED"), Option::<&str>::None))
+    }
+
+    async fn dispatch_noreply(&self, _command: &str, _frame: RawFrame) {}
+}
+
+pub struct NoopDispatcher;
+
+impl Dispatcher for NoopDispatcher {}
 
 struct ExpectReply {
     tag: u64,
@@ -59,65 +72,6 @@ enum WriteCmd {
     Exit,
 }
 
-#[derive(Debug)]
-pub struct ReplyTicket {
-    tag: Option<Bytes>,
-    write_handle: mpsc::Sender<WriteCmd>,
-}
-
-impl ReplyTicket {
-    pub async fn ok<R: Serialize>(mut self, reply: R) -> Result<(), Error> {
-        let tag = self.tag.take().expect("Tag taken out of sequence");
-
-        let reply = amp_serde::to_bytes(OkResponse { tag, fields: reply })?;
-
-        self.write_handle
-            .send(WriteCmd::Reply(reply.into()))
-            .await?;
-
-        Ok(())
-    }
-
-    pub async fn error(
-        mut self,
-        code: Option<String>,
-        description: Option<String>,
-    ) -> Result<(), Error> {
-        let tag = self.tag.take().expect("Tag taken out of sequence");
-
-        let reply = amp_serde::to_bytes(ErrorResponse {
-            tag,
-            code: code.unwrap_or_else(|| "UNKNOWN".into()),
-            description: description.unwrap_or_else(|| "".into()),
-        })?;
-
-        self.write_handle
-            .send(WriteCmd::Reply(reply.into()))
-            .await?;
-
-        Ok(())
-    }
-}
-
-impl Drop for ReplyTicket {
-    fn drop(&mut self) {
-        if let Some(tag) = self.tag.take() {
-            let mut write_handle = self.write_handle.clone();
-            let reply = amp_serde::to_bytes(ErrorResponse {
-                tag,
-                code: "UNKNOWN".into(),
-                description: "Request dropped without reply".into(),
-            })
-            .unwrap();
-
-            // Can't wait for poll_drop
-            tokio::spawn(async move {
-                let _ = write_handle.send(WriteCmd::Reply(reply.into())).await;
-            });
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct RequestSender(mpsc::Sender<WriteCmd>);
 
@@ -139,10 +93,7 @@ impl RequestSender {
 
         self.0.send(WriteCmd::Request(frame, Some(tx))).await?;
 
-        let raw_frame = rx.await?.map_err(|err| Error::Remote {
-            code: err.code,
-            description: err.description,
-        })?;
+        let raw_frame = rx.await?.map_err(Error::Remote)?;
 
         // FIXME: do this without an intermediary copy when serde gets
         // good at deserializing untagged enums with flattened structs.
@@ -217,21 +168,21 @@ impl Handle {
     }
 }
 
-pub fn serve<R, W>(input: R, output: W) -> (Handle, mpsc::Receiver<DispatchRequest>)
+pub fn serve<R, W, D>(input: R, output: W, dispatcher: D) -> Handle
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
+    D: Dispatcher,
 {
     let state = Arc::new(RwLock::new(LoopState::default()));
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(QUEUE_DEPTH);
-    let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(QUEUE_DEPTH);
     let (expect_tx, expect_rx) = mpsc::channel::<ExpectReply>(QUEUE_DEPTH);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
     let read_state = state.clone();
     let write_tx2 = write_tx.clone();
     let read_res = tokio::spawn(async move {
-        let res = read_loop(input, shutdown_rx, write_tx2, dispatch_tx, expect_rx).await;
+        let res = read_loop(input, shutdown_rx, write_tx2, dispatcher, expect_rx).await;
         read_state.write().unwrap().read_done = true;
         res
     });
@@ -243,39 +194,40 @@ where
         res
     });
 
-    (
-        Handle {
-            state,
-            write_res,
-            read_res,
-            write_loop_handle: Some(write_tx),
-            shutdown: Some(shutdown_tx),
-        },
-        dispatch_rx,
-    )
+    Handle {
+        state,
+        write_res,
+        read_res,
+        write_loop_handle: Some(write_tx),
+        shutdown: Some(shutdown_tx),
+    }
 }
 
 type ReplyMap = HashMap<u64, oneshot::Sender<Response>>;
 
-async fn read_loop<R>(
+async fn read_loop<R, D>(
     input: R,
     mut shutdown: oneshot::Receiver<()>,
     mut write_tx: mpsc::Sender<WriteCmd>,
-    mut dispatch_tx: mpsc::Sender<DispatchRequest>,
+    dispatcher: D,
     mut expect_rx: mpsc::Receiver<ExpectReply>,
 ) -> Result<(), Error>
 where
     R: AsyncRead + Unpin,
+    D: Dispatcher,
 {
     let codec_in: Decoder<RawFrame> = Decoder::new();
     let mut input = FramedRead::new(input, codec_in);
     let mut reply_map = ReplyMap::new();
+    let mut dispatched_requests = FuturesUnordered::new();
 
     loop {
         tokio::select! {
             frame = input.next() => {
                 if let Some(frame) = frame {
-                    dispatch_frame(frame?, &mut reply_map, &mut write_tx, &mut dispatch_tx).await?;
+                    if let Some(dr) = dispatch_frame(frame?, &mut reply_map, &mut write_tx, &dispatcher).await? {
+                        dispatched_requests.push(dr);
+                    }
                 } else {
                     break;
                 }
@@ -288,6 +240,9 @@ where
                     break;
                 }
             }
+            dr = dispatched_requests.try_next(), if !dispatched_requests.is_empty() => {
+                dr?;
+            }
             _ = &mut shutdown => {
                 write_tx.send(WriteCmd::Exit).await?;
                 break;
@@ -298,30 +253,49 @@ where
     Ok(())
 }
 
-async fn dispatch_frame(
+async fn dispatch_frame<'a, D>(
     frame: RawFrame,
     reply_map: &mut ReplyMap,
     write_tx: &mut mpsc::Sender<WriteCmd>,
-    dispatch_tx: &mut mpsc::Sender<DispatchRequest>,
-) -> Result<(), Error> {
+    dispatcher: &'a D,
+) -> Result<Option<impl Future<Output = Result<(), Error>> + 'a>, Error>
+where
+    D: Dispatcher,
+{
     match frame.try_into()? {
         Frame::Request {
             tag,
             command,
             fields,
-        } => {
-            let ticket = tag.map(|tag| ReplyTicket {
-                tag: Some(tag),
-                write_handle: write_tx.clone(),
-            });
+        } => Ok(Some(match tag {
+            None => async move {
+                dispatcher
+                    .dispatch_noreply(std::str::from_utf8(&command)?, fields)
+                    .await;
 
-            // The application may close its dispatch channel. All
-            // incoming requests will generate a "Request dropped
-            // without reply" error.
-            let _ = dispatch_tx
-                .send(DispatchRequest(command, fields, ticket))
-                .await;
-        }
+                Ok(())
+            }
+            .left_future(),
+            Some(tag) => {
+                let mut write_tx = write_tx.clone();
+                async move {
+                    let reply = match dispatcher
+                        .dispatch(std::str::from_utf8(&command)?, fields)
+                        .await
+                    {
+                        Ok(reply) => amp_serde::to_bytes(OkResponse { tag, fields: reply })?,
+                        Err(e) => amp_serde::to_bytes(ErrorResponse {
+                            tag,
+                            code: e.code,
+                            description: e.description,
+                        })?,
+                    };
+                    write_tx.send(WriteCmd::Reply(reply.into())).await?;
+                    Ok(())
+                }
+                .right_future()
+            }
+        })),
 
         Frame::Response { tag, response } => {
             let reply_tx = std::str::from_utf8(&tag)
@@ -331,10 +305,9 @@ async fn dispatch_frame(
                 .ok_or(Error::UnmatchedReply)?;
 
             reply_tx.send(response).map_err(|_| Error::SendError)?;
+            Ok(None)
         }
     }
-
-    Ok(())
 }
 
 async fn write_loop<W>(

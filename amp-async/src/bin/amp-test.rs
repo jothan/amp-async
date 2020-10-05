@@ -1,14 +1,31 @@
 // Clippy does not like using Bytes as keys.
 #![allow(clippy::mutable_key_type)]
 
+use async_trait::async_trait;
 use bytes::Bytes;
 
-use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use tokio::io::{stdin, stdout};
 
-use amp_async::{serve, AmpList, RawFrame, ReplyTicket};
+use amp_async::{serve, AmpList, Dispatcher, RawFrame, RemoteError};
+
+struct SumDispatcher;
+
+#[async_trait]
+impl Dispatcher for SumDispatcher {
+    async fn dispatch(&self, command: &str, frame: RawFrame) -> Result<RawFrame, RemoteError> {
+        eprintln!("got request: {:?} {:?}", command, frame);
+        match command {
+            "Sum" => Ok(sum_request(frame).await),
+            _ => Err(RemoteError::new(Some("UNHANDLED"), Option::<&str>::None)),
+        }
+    }
+
+    async fn dispatch_noreply(&self, command: &str, frame: RawFrame) {
+        eprintln!("got blind request: {:?} {:?}", command, frame);
+    }
+}
 
 fn parse_int(input: Option<Bytes>) -> Option<i64> {
     input
@@ -38,24 +55,20 @@ struct SumManyResponse {
     totals: AmpList<SumResponse>,
 }
 
-async fn sum_request(
-    mut fields: RawFrame,
-    tag: Option<ReplyTicket>,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn sum_request(mut fields: RawFrame) -> RawFrame {
     let a: i64 = parse_int(fields.remove(b"a".as_ref())).unwrap();
     let b: i64 = parse_int(fields.remove(b"b".as_ref())).unwrap();
 
-    if let Some(tag) = tag {
-        let resp = SumResponse { total: a + b };
-        tag.ok(resp).await?;
-    };
+    let total = a + b;
+    let mut out = RawFrame::new();
+    out.insert(b"total".as_ref().into(), format!("{}", total).into());
 
-    Ok(())
+    out
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (handle, dispatch) = serve(stdin(), stdout());
+    let handle = serve(stdin(), stdout(), SumDispatcher);
 
     let mut request = handle.request_sender().unwrap();
 
@@ -79,22 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let res: SumManyResponse = request.call_remote("SumMany".into(), req).await?;
     eprintln!("res3: {:?}", res.totals.0);
 
-    dispatch
-        .for_each_concurrent(10, |request| async move {
-            eprintln!("got request: {:?} {:?}", request.0, request.1);
-            match request.0.as_ref() {
-                b"Sum" => sum_request(request.1, request.2).await.unwrap(),
-                _ => {
-                    if let Some(tag) = request.2 {
-                        tag.error(Some("UNHANDLED".into()), None).await.unwrap();
-                    };
-                }
-            }
-        })
-        .await;
-
     drop(request);
     handle.join().await?;
-
     Ok(())
 }
