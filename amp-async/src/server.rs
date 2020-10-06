@@ -36,6 +36,42 @@ pub struct NoopDispatcher;
 
 impl Dispatcher for NoopDispatcher {}
 
+pub struct Builder<D> {
+    dispatcher: D,
+    version2: bool,
+}
+
+impl Default for Builder<NoopDispatcher> {
+    fn default() -> Builder<NoopDispatcher> {
+        Builder {
+            dispatcher: NoopDispatcher,
+            version2: false,
+        }
+    }
+}
+
+impl<D: Dispatcher> Builder<D> {
+    pub fn version2(mut self) -> Builder<D> {
+        self.version2 = true;
+        self
+    }
+
+    pub fn dispatcher<E: Dispatcher>(self, dispatcher: E) -> Builder<E> {
+        Builder {
+            dispatcher,
+            version2: self.version2,
+        }
+    }
+
+    pub fn serve<R, W>(self, input: R, output: W) -> Handle
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        serve(input, output, self.dispatcher, self.version2)
+    }
+}
+
 struct ExpectReply {
     tag: u64,
     reply: oneshot::Sender<Response>,
@@ -168,7 +204,7 @@ impl Handle {
     }
 }
 
-pub fn serve<R, W, D>(input: R, output: W, dispatcher: D) -> Handle
+fn serve<R, W, D>(input: R, output: W, dispatcher: D, version2: bool) -> Handle
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -182,7 +218,16 @@ where
     let read_state = state.clone();
     let write_tx2 = write_tx.clone();
     let read_res = tokio::spawn(async move {
-        let res = read_loop(input, shutdown_rx, write_tx2, dispatcher, expect_rx).await;
+        let res = read_loop(
+            input,
+            shutdown_rx,
+            write_tx2,
+            dispatcher,
+            expect_rx,
+            version2,
+        )
+        .await;
+        eprintln!("read loop exit: {:?}", res);
         read_state.write().unwrap().read_done = true;
         res
     });
@@ -190,6 +235,7 @@ where
     let write_state = state.clone();
     let write_res = tokio::spawn(async move {
         let res = write_loop(output, write_rx, expect_tx).await;
+        eprintln!("write loop exit: {:?}", res);
         write_state.write().unwrap().write_done = true;
         res
     });
@@ -211,12 +257,17 @@ async fn read_loop<R, D>(
     mut write_tx: mpsc::Sender<WriteCmd>,
     dispatcher: D,
     mut expect_rx: mpsc::Receiver<ExpectReply>,
+    version2: bool,
 ) -> Result<(), Error>
 where
     R: AsyncRead + Unpin,
     D: Dispatcher,
 {
-    let codec_in: Decoder<RawFrame> = Decoder::new();
+    let codec_in: Decoder<RawFrame> = if version2 {
+        Decoder::new_v2()
+    } else {
+        Decoder::new()
+    };
     let mut input = FramedRead::new(input, codec_in);
     let mut reply_map = ReplyMap::new();
     let mut dispatched_requests = FuturesUnordered::new();

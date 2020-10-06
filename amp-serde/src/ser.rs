@@ -1,5 +1,5 @@
 use std::convert::TryFrom;
-use std::io::Write;
+use std::io::{self, Write};
 
 const INITIAL_CAPACITY: usize = 256;
 
@@ -187,9 +187,9 @@ impl<'a> serde::Serializer for &'a mut Serializer {
 
     fn serialize_bool(self, v: bool) -> Result<Self::Ok> {
         if v {
-            self.0.extend_from_slice(b"True");
+            self.push_bytes(b"True");
         } else {
-            self.0.extend_from_slice(b"False");
+            self.push_bytes(b"False");
         }
         Ok(())
     }
@@ -207,7 +207,7 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_i64(self, v: i64) -> Result<Self::Ok> {
-        write!(self.0, "{}", v)?;
+        write!(self, "{}", v)?;
         Ok(())
     }
 
@@ -224,7 +224,7 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_u64(self, v: u64) -> Result<Self::Ok> {
-        write!(self.0, "{}", v)?;
+        write!(self, "{}", v)?;
         Ok(())
     }
 
@@ -234,15 +234,15 @@ impl<'a> serde::Serializer for &'a mut Serializer {
 
     fn serialize_f64(self, v: f64) -> Result<Self::Ok> {
         if v.is_nan() {
-            self.0.extend_from_slice(b"nan");
+            self.push_bytes(b"nan");
         } else if v.is_infinite() {
             if v.is_sign_positive() {
-                self.0.extend_from_slice(b"inf");
+                self.push_bytes(b"inf");
             } else {
-                self.0.extend_from_slice(b"-inf");
+                self.push_bytes(b"-inf");
             }
         } else {
-            write!(self.0, "{}", v)?;
+            write!(self, "{}", v)?;
         }
 
         Ok(())
@@ -255,12 +255,12 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 
     fn serialize_str(self, v: &str) -> Result<Self::Ok> {
-        self.0.extend_from_slice(v.as_bytes());
+        self.push_bytes(v.as_bytes());
         Ok(())
     }
 
     fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok> {
-        self.0.extend_from_slice(value);
+        self.push_bytes(value);
         Ok(())
     }
 
@@ -359,6 +359,23 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     fn is_human_readable(&self) -> bool {
         // Python abuses strings
         true
+    }
+}
+
+impl Serializer {
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes)
+    }
+}
+
+impl Write for Serializer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.push_bytes(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

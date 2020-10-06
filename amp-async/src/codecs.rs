@@ -8,14 +8,17 @@ pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 pub struct Dec<D = Vec<(Bytes, Bytes)>> {
     state: State,
     key: Bytes,
+    value: BytesMut,
     frame: D,
     decoder: LengthDelimitedCodec,
+    version2: bool,
 }
 
 #[derive(Debug, PartialEq)]
 enum State {
     Key,
     Value,
+    ValueCont,
 }
 
 impl Default for State {
@@ -33,18 +36,50 @@ impl<D: Default> Default for Dec<D> {
                 .max_frame_length(AMP_KEY_LIMIT)
                 .new_codec(),
             key: Default::default(),
+            value: Default::default(),
             frame: Default::default(),
             state: Default::default(),
+            version2: false,
         }
     }
 }
 
 impl<D> Dec<D>
 where
-    D: Default,
+    D: Default + Extend<(Bytes, Bytes)>,
 {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    pub fn new_v2() -> Self {
+        let mut d = Dec::new();
+        d.version2 = true;
+        d
+    }
+
+    fn handle_value(&mut self, segment: BytesMut) {
+        if self.version2 && segment.len() == AMP_VALUE_LIMIT {
+            self.value = segment;
+            self.state = State::ValueCont;
+        } else {
+            let key = std::mem::take(&mut self.key);
+            self.frame.extend(std::iter::once((key, segment.freeze())));
+            self.state = State::Key;
+            self.decoder.set_max_frame_length(AMP_KEY_LIMIT);
+        }
+    }
+
+    fn handle_valuecont(&mut self, segment: BytesMut) {
+        self.value.extend_from_slice(&segment);
+
+        if segment.len() != AMP_VALUE_LIMIT {
+            let key = std::mem::take(&mut self.key);
+            let value = std::mem::take(&mut self.value);
+            self.frame.extend(std::iter::once((key, value.freeze())));
+            self.state = State::Key;
+            self.decoder.set_max_frame_length(AMP_KEY_LIMIT);
+        }
     }
 }
 
@@ -72,12 +107,8 @@ where
                         self.decoder.set_max_frame_length(AMP_VALUE_LIMIT);
                     }
                 }
-                State::Value => {
-                    let key = std::mem::take(&mut self.key);
-                    self.frame.extend(std::iter::once((key, segment.freeze())));
-                    self.state = State::Key;
-                    self.decoder.set_max_frame_length(AMP_KEY_LIMIT);
-                }
+                State::Value => self.handle_value(segment),
+                State::ValueCont => self.handle_valuecont(segment),
             }
         }
     }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use tokio::io::{stdin, stdout};
 
-use amp_async::{serve, AmpList, Dispatcher, RawFrame, RemoteError};
+use amp_async::{AmpList, Builder, Dispatcher, RawFrame, RemoteError};
 
 struct SumDispatcher;
 
@@ -68,7 +68,9 @@ async fn sum_request(mut fields: RawFrame) -> RawFrame {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let handle = serve(stdin(), stdout(), SumDispatcher);
+    let handle = Builder::default()
+        .dispatcher(SumDispatcher)
+        .serve(stdin(), stdout());
 
     let mut request = handle.request_sender().unwrap();
 
