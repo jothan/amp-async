@@ -1,16 +1,15 @@
-use std::convert::TryInto;
-
-use bytes::{Buf, Bytes, BytesMut};
-use tokio_util::codec::Decoder;
+use bytes::{Bytes, BytesMut};
+use tokio_util::codec::{Decoder, LengthDelimitedCodec};
 
 pub(crate) const AMP_KEY_LIMIT: usize = 0xff;
-const LENGTH_SIZE: usize = std::mem::size_of::<u16>();
+pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug)]
 pub struct Dec<D = Vec<(Bytes, Bytes)>> {
     state: State,
     key: Bytes,
     frame: D,
+    decoder: LengthDelimitedCodec,
 }
 
 #[derive(Debug, PartialEq)]
@@ -25,6 +24,21 @@ impl Default for State {
     }
 }
 
+impl<D: Default> Default for Dec<D> {
+    fn default() -> Self {
+        Dec {
+            decoder: LengthDelimitedCodec::builder()
+                .big_endian()
+                .length_field_length(2)
+                .max_frame_length(AMP_KEY_LIMIT)
+                .new_codec(),
+            key: Default::default(),
+            frame: Default::default(),
+            state: Default::default(),
+        }
+    }
+}
+
 impl<D> Dec<D>
 where
     D: Default,
@@ -32,79 +46,41 @@ where
     pub fn new() -> Self {
         Default::default()
     }
-
-    fn read_key(length: usize, buf: &mut BytesMut) -> Result<Option<Bytes>, CodecError> {
-        if length > AMP_KEY_LIMIT {
-            return Err(CodecError::KeyTooLong);
-        }
-
-        Ok(Self::read_delimited(length, buf))
-    }
-
-    fn read_delimited(length: usize, buf: &mut BytesMut) -> Option<Bytes> {
-        if buf.len() >= length + LENGTH_SIZE {
-            buf.advance(LENGTH_SIZE);
-            Some(buf.split_to(length).freeze())
-        } else {
-            None
-        }
-    }
 }
 
 impl<D> Decoder for Dec<D>
 where
     D: Default + Extend<(Bytes, Bytes)>,
 {
-    type Error = CodecError;
+    type Error = std::io::Error;
     type Item = D;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         loop {
-            if buf.len() < LENGTH_SIZE {
-                return Ok(None);
-            }
-
-            let (length_bytes, _) = buf.split_at(LENGTH_SIZE);
-            let length = usize::from(u16::from_be_bytes(length_bytes.try_into().unwrap()));
+            let segment = match self.decoder.decode(buf)? {
+                Some(s) => s,
+                None => return Ok(None),
+            };
 
             match self.state {
                 State::Key => {
-                    if length == 0 {
-                        buf.advance(LENGTH_SIZE);
-                        return Ok(Some(std::mem::take(&mut self.frame)));
+                    if segment.is_empty() {
+                        break Ok(Some(std::mem::take(&mut self.frame)));
                     } else {
-                        match Self::read_key(length, buf)? {
-                            Some(key) => {
-                                self.key = key;
-                                self.state = State::Value;
-                            }
-                            None => {
-                                return Ok(None);
-                            }
-                        }
+                        self.key = segment.freeze();
+                        self.state = State::Value;
+                        self.decoder.set_max_frame_length(AMP_VALUE_LIMIT);
                     }
                 }
-                State::Value => match Self::read_delimited(length, buf) {
-                    Some(value) => {
-                        let key = std::mem::take(&mut self.key);
-                        self.frame.extend(std::iter::once((key, value)));
-                        self.state = State::Key;
-                    }
-                    None => {
-                        return Ok(None);
-                    }
-                },
+                State::Value => {
+                    let key = std::mem::take(&mut self.key);
+                    self.frame.extend(std::iter::once((key, segment.freeze())));
+                    self.state = State::Key;
+                    self.decoder.set_max_frame_length(AMP_KEY_LIMIT);
+                }
             }
         }
     }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum CodecError {
-    #[error("IO error")]
-    IO(#[from] std::io::Error),
-    #[error("Key too long")]
-    KeyTooLong,
 }
 
 #[cfg(test)]
@@ -144,7 +120,6 @@ mod test {
             WWW_EXAMPLE_DEC
         );
         assert_eq!(buf.len(), 0);
-        assert_eq!(dec, Decoder::<Vec<_>>::new());
     }
 
     #[test]

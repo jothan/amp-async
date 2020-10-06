@@ -1,5 +1,3 @@
-use crate::codecs::CodecError;
-
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Ambiguous frame type")]
@@ -10,8 +8,6 @@ pub enum Error {
     UnmatchedReply,
     #[error("Internal channel error")]
     InternalError,
-    #[error("Codec error: {0}")]
-    Codec(#[from] CodecError),
     #[error("Serde error: {0}")]
     Serde(#[from] amp_serde::Error),
     #[error("Remote error: {0}")]
