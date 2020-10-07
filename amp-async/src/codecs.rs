@@ -1,17 +1,22 @@
+use std::iter::Extend;
+use std::marker::PhantomData;
+
 use bytes::{Bytes, BytesMut};
 use tokio_util::codec::{Decoder, LengthDelimitedCodec};
+
+use crate::{AmpVersion, V1, V2};
 
 pub(crate) const AMP_KEY_LIMIT: usize = 0xff;
 pub(crate) const AMP_VALUE_LIMIT: usize = 0xffff;
 
 #[derive(Debug)]
-pub struct Dec<D = Vec<(Bytes, Bytes)>> {
+pub struct Dec<V, D = Vec<(Bytes, Bytes)>> {
     state: State,
     key: Bytes,
     value: BytesMut,
     frame: D,
     decoder: LengthDelimitedCodec,
-    version2: bool,
+    version: PhantomData<V>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -27,7 +32,7 @@ impl Default for State {
     }
 }
 
-impl<D: Default> Default for Dec<D> {
+impl<V, D: Default> Default for Dec<V, D> {
     fn default() -> Self {
         Dec {
             decoder: LengthDelimitedCodec::builder()
@@ -39,35 +44,17 @@ impl<D: Default> Default for Dec<D> {
             value: Default::default(),
             frame: Default::default(),
             state: Default::default(),
-            version2: false,
+            version: PhantomData,
         }
     }
 }
 
-impl<D> Dec<D>
+impl<V, D> Dec<V, D>
 where
     D: Default + Extend<(Bytes, Bytes)>,
 {
     pub fn new() -> Self {
         Default::default()
-    }
-
-    pub fn new_v2() -> Self {
-        let mut d = Dec::new();
-        d.version2 = true;
-        d
-    }
-
-    fn handle_value(&mut self, segment: BytesMut) {
-        if self.version2 && segment.len() == AMP_VALUE_LIMIT {
-            self.value = segment;
-            self.state = State::ValueCont;
-        } else {
-            let key = std::mem::take(&mut self.key);
-            self.frame.extend(std::iter::once((key, segment.freeze())));
-            self.state = State::Key;
-            self.decoder.set_max_frame_length(AMP_KEY_LIMIT);
-        }
     }
 
     fn handle_valuecont(&mut self, segment: BytesMut) {
@@ -83,9 +70,33 @@ where
     }
 }
 
-impl<D> Decoder for Dec<D>
+impl AmpVersion for V1 {
+    fn handle_value<D: Extend<(Bytes, Bytes)>>(dec: &mut Dec<Self, D>, segment: BytesMut) {
+        let key = std::mem::take(&mut dec.key);
+        dec.frame.extend(std::iter::once((key, segment.freeze())));
+        dec.state = State::Key;
+        dec.decoder.set_max_frame_length(AMP_KEY_LIMIT);
+    }
+}
+
+impl AmpVersion for V2 {
+    fn handle_value<D: Extend<(Bytes, Bytes)>>(dec: &mut Dec<Self, D>, segment: BytesMut) {
+        if segment.len() == AMP_VALUE_LIMIT {
+            dec.value = segment;
+            dec.state = State::ValueCont;
+        } else {
+            let key = std::mem::take(&mut dec.key);
+            dec.frame.extend(std::iter::once((key, segment.freeze())));
+            dec.state = State::Key;
+            dec.decoder.set_max_frame_length(AMP_KEY_LIMIT);
+        }
+    }
+}
+
+impl<V, D> Decoder for Dec<V, D>
 where
     D: Default + Extend<(Bytes, Bytes)>,
+    V: AmpVersion,
 {
     type Error = std::io::Error;
     type Item = D;
@@ -107,7 +118,7 @@ where
                         self.decoder.set_max_frame_length(AMP_VALUE_LIMIT);
                     }
                 }
-                State::Value => self.handle_value(segment),
+                State::Value => V::handle_value(self, segment),
                 State::ValueCont => self.handle_valuecont(segment),
             }
         }
@@ -116,7 +127,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use amp_serde::Request;
+    use amp_serde::{Request, V1};
     use bytes::BytesMut;
     use serde::Serialize;
     use tokio_util::codec::Decoder as _;
@@ -137,7 +148,7 @@ mod test {
 
     #[test]
     fn decode_example() {
-        let mut dec = Decoder::<Vec<_>>::new();
+        let mut dec = Decoder::<V1, Vec<_>>::new();
         let mut buf = BytesMut::new();
         buf.extend(WWW_EXAMPLE);
 
@@ -162,7 +173,7 @@ mod test {
         }
         let fields = Sum { a: 13, b: 81 };
 
-        let buf = amp_serde::to_bytes(Request {
+        let buf = amp_serde::to_bytes::<V1, _>(Request {
             command: "Sum".into(),
             tag: Some(b"23".as_ref().into()),
             fields,

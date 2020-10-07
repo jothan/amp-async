@@ -1,5 +1,6 @@
 use std::convert::TryFrom;
 use std::io::{self, Write};
+use std::marker::PhantomData;
 
 const INITIAL_CAPACITY: usize = 256;
 
@@ -10,34 +11,34 @@ use serde::ser::{
 };
 use serde::Serialize;
 
-use crate::{Error, Result, AMP_KEY_LIMIT, AMP_LENGTH_SIZE, AMP_VALUE_LIMIT};
+use crate::{Error, Result, AMP_KEY_LIMIT, AMP_LENGTH_SIZE, AMP_VALUE_LIMIT, V1, V2};
 
 #[derive(Debug)]
-pub struct Serializer(Vec<u8>);
+pub struct Serializer<V>(Vec<u8>, PhantomData<V>);
 
-impl Default for Serializer {
-    fn default() -> Serializer {
-        Serializer(Vec::with_capacity(INITIAL_CAPACITY))
+impl<V> Default for Serializer<V> {
+    fn default() -> Serializer<V> {
+        Serializer(Vec::with_capacity(INITIAL_CAPACITY), PhantomData)
     }
 }
 
 #[doc(hidden)]
-pub struct Compound<'a> {
-    ser: &'a mut Serializer,
+pub struct Compound<'a, V> {
+    ser: &'a mut Serializer<V>,
 }
 
-impl Compound<'_> {
-    fn new(ser: &mut Serializer) -> Compound<'_> {
+impl<'a, V> Compound<'a, V> {
+    fn new(ser: &'a mut Serializer<V>) -> Compound<'a, V> {
         Compound { ser }
     }
 }
 
-impl<'a> SerializeSeq for Compound<'a> {
+impl<'a, V: AmpEncoder> SerializeSeq for Compound<'a, V> {
     type Ok = ();
     type Error = Error;
 
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        self.push_value(value)
+        self.ser.push_value(value)
     }
 
     fn end(self) -> Result<()> {
@@ -45,12 +46,12 @@ impl<'a> SerializeSeq for Compound<'a> {
     }
 }
 
-impl<'a> SerializeTuple for Compound<'a> {
+impl<'a, V: AmpEncoder> SerializeTuple for Compound<'a, V> {
     type Ok = ();
     type Error = Error;
 
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        self.push_value(value)
+        self.ser.push_value(value)
     }
 
     fn end(self) -> Result<()> {
@@ -58,12 +59,12 @@ impl<'a> SerializeTuple for Compound<'a> {
     }
 }
 
-impl<'a> SerializeTupleStruct for Compound<'a> {
+impl<'a, V: AmpEncoder> SerializeTupleStruct for Compound<'a, V> {
     type Ok = ();
     type Error = Error;
 
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        self.push_value(value)
+        self.ser.push_value(value)
     }
 
     fn end(self) -> Result<()> {
@@ -71,7 +72,7 @@ impl<'a> SerializeTupleStruct for Compound<'a> {
     }
 }
 
-impl<'a> SerializeTupleVariant for Compound<'a> {
+impl<'a, V: AmpEncoder> SerializeTupleVariant for Compound<'a, V> {
     type Ok = ();
     type Error = Error;
 
@@ -85,16 +86,16 @@ impl<'a> SerializeTupleVariant for Compound<'a> {
     }
 }
 
-impl<'a> SerializeMap for Compound<'a> {
+impl<'a, V: AmpEncoder> SerializeMap for Compound<'a, V> {
     type Ok = ();
     type Error = Error;
 
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<()> {
-        self.push_key(key)
+        self.ser.push_key(key)
     }
 
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        self.push_value(value)
+        V::push_long_value(&mut self.ser, value)
     }
 
     fn end(self) -> Result<Self::Ok> {
@@ -103,7 +104,7 @@ impl<'a> SerializeMap for Compound<'a> {
     }
 }
 
-impl<'a> SerializeStruct for Compound<'a> {
+impl<'a, V: AmpEncoder> SerializeStruct for Compound<'a, V> {
     type Ok = ();
     type Error = Error;
 
@@ -112,8 +113,8 @@ impl<'a> SerializeStruct for Compound<'a> {
         key: &'static str,
         value: &T,
     ) -> Result<()> {
-        self.push_key(key)?;
-        self.push_value(value)?;
+        self.ser.push_key(key)?;
+        V::push_long_value(&mut self.ser, value)?;
         Ok(())
     }
 
@@ -123,21 +124,50 @@ impl<'a> SerializeStruct for Compound<'a> {
     }
 }
 
-impl Compound<'_> {
-    fn push_value<T: Serialize + ?Sized>(&mut self, input: &T) -> Result<()> {
-        let length_offset = self.ser.prep_len();
-        input.serialize(&mut *self.ser)?;
-        self.ser.write_len(length_offset, false)
-    }
+pub trait AmpEncoder: Sized {
+    fn push_long_value<T: Serialize + ?Sized>(ser: &mut Serializer<Self>, input: &T) -> Result<()>;
+}
 
-    fn push_key<T: Serialize + ?Sized>(&mut self, input: &T) -> Result<()> {
-        let length_offset = self.ser.prep_len();
-        input.serialize(&mut *self.ser)?;
-        self.ser.write_len(length_offset, true)
+impl AmpEncoder for V1 {
+    fn push_long_value<T: Serialize + ?Sized>(ser: &mut Serializer<Self>, input: &T) -> Result<()> {
+        ser.push_value(input)
     }
 }
 
-impl Serializer {
+impl AmpEncoder for V2 {
+    fn push_long_value<T: Serialize + ?Sized>(ser: &mut Serializer<Self>, input: &T) -> Result<()> {
+        // Allocate a temporary buffer. Somewhat less efficient than
+        // recursive position tracking, but easy to get right for now.
+        let mut subser = Serializer::<V2>::default();
+        input.serialize(&mut subser)?;
+
+        let value = Vec::from(subser);
+        if value.is_empty() {
+            ser.push_bytes(b"\x00\x00");
+            return Ok(());
+        }
+
+        for chunk in value.chunks(AMP_VALUE_LIMIT) {
+            let length = u16::try_from(chunk.len()).unwrap();
+            ser.push_bytes(length.to_be_bytes().as_ref());
+            ser.push_bytes(chunk);
+        }
+
+        Ok(())
+    }
+}
+
+impl<V: AmpEncoder> Serializer<V> {
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes)
+    }
+
+    fn push_value<T: Serialize + ?Sized>(&mut self, input: &T) -> Result<()> {
+        let length_offset = self.prep_len();
+        input.serialize(&mut *self)?;
+        self.write_len(length_offset, false)
+    }
+
     fn prep_len(&mut self) -> usize {
         let length_offset = self.0.len();
 
@@ -165,24 +195,30 @@ impl Serializer {
 
         Ok(())
     }
+
+    fn push_key<T: Serialize + ?Sized>(&mut self, input: &T) -> Result<()> {
+        let length_offset = self.prep_len();
+        input.serialize(&mut *self)?;
+        self.write_len(length_offset, true)
+    }
 }
 
-impl From<Serializer> for Vec<u8> {
-    fn from(input: Serializer) -> Vec<u8> {
+impl<V> From<Serializer<V>> for Vec<u8> {
+    fn from(input: Serializer<V>) -> Vec<u8> {
         input.0
     }
 }
 
-impl<'a> serde::Serializer for &'a mut Serializer {
+impl<'a, V: AmpEncoder> serde::Serializer for &'a mut Serializer<V> {
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = Compound<'a>;
-    type SerializeTuple = Compound<'a>;
-    type SerializeTupleStruct = Compound<'a>;
-    type SerializeTupleVariant = Compound<'a>;
-    type SerializeMap = Compound<'a>;
-    type SerializeStruct = Compound<'a>;
+    type SerializeSeq = Compound<'a, V>;
+    type SerializeTuple = Compound<'a, V>;
+    type SerializeTupleStruct = Compound<'a, V>;
+    type SerializeTupleVariant = Compound<'a, V>;
+    type SerializeMap = Compound<'a, V>;
+    type SerializeStruct = Compound<'a, V>;
     type SerializeStructVariant = Impossible<Self::Ok, Self::Error>;
 
     fn serialize_bool(self, v: bool) -> Result<Self::Ok> {
@@ -362,13 +398,10 @@ impl<'a> serde::Serializer for &'a mut Serializer {
     }
 }
 
-impl Serializer {
-    fn push_bytes(&mut self, bytes: &[u8]) {
-        self.0.extend_from_slice(bytes)
-    }
-}
-
-impl Write for Serializer {
+impl<V> Write for Serializer<V>
+where
+    V: AmpEncoder,
+{
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.push_bytes(buf);
         Ok(buf.len())
@@ -379,8 +412,8 @@ impl Write for Serializer {
     }
 }
 
-pub fn to_bytes<T: Serialize>(value: T) -> Result<Vec<u8>> {
-    let mut serializer: Serializer = Default::default();
+pub fn to_bytes<V: AmpEncoder, T: Serialize>(value: T) -> Result<Vec<u8>> {
+    let mut serializer = Serializer::<V>::default();
     value.serialize(&mut serializer)?;
     Ok(serializer.into())
 }

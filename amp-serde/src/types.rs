@@ -196,7 +196,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::{from_bytes, to_bytes, AmpList, Error};
+    use crate::{from_bytes, to_bytes, AmpList, Error, V1};
     use serde::{Deserialize, Serialize};
 
     const LIST_ENC: [u8; 42] = [
@@ -217,13 +217,13 @@ mod test {
             AB { a: 3, b: 4 },
             AB { a: 5, b: 6 },
         ]);
-        let bytes = to_bytes(list).unwrap();
+        let bytes = to_bytes::<V1, _>(list).unwrap();
         assert_eq!(bytes, LIST_ENC.as_ref());
     }
 
     #[test]
     fn amp_list_dec() {
-        let list: AmpList<AB> = from_bytes(&LIST_ENC).unwrap();
+        let list: AmpList<AB> = from_bytes::<V1, _, _>(LIST_ENC.to_vec()).unwrap();
 
         assert_eq!(
             list.0,
@@ -233,7 +233,7 @@ mod test {
 
     #[test]
     fn trailling_dicts() {
-        match from_bytes::<std::collections::BTreeMap<Vec<u8>, Vec<u8>>>(&LIST_ENC) {
+        match from_bytes::<V1, _, std::collections::BTreeMap<Vec<u8>, Vec<u8>>>(LIST_ENC.to_vec()) {
             Err(Error::RemainingBytes) => (),
             _ => unreachable!(),
         }

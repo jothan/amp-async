@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
@@ -19,7 +20,7 @@ use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 use amp_serde::{ErrorResponse, OkResponse, Request};
 
 use crate::frame::Response;
-use crate::{Decoder, Error, Frame, RawFrame, RemoteError};
+use crate::{AmpVersion, Decoder, Error, Frame, RawFrame, RemoteError, V1, V2};
 
 const QUEUE_DEPTH: usize = 32;
 
@@ -36,39 +37,44 @@ pub struct NoopDispatcher;
 
 impl Dispatcher for NoopDispatcher {}
 
-pub struct Builder<D> {
+pub struct Builder<D, V> {
     dispatcher: D,
-    version2: bool,
+    version: PhantomData<V>,
 }
 
-impl Default for Builder<NoopDispatcher> {
-    fn default() -> Builder<NoopDispatcher> {
+impl Default for Builder<NoopDispatcher, V1> {
+    fn default() -> Builder<NoopDispatcher, V1> {
         Builder {
             dispatcher: NoopDispatcher,
-            version2: false,
+            version: PhantomData,
         }
     }
 }
 
-impl<D: Dispatcher> Builder<D> {
-    pub fn version2(mut self) -> Builder<D> {
-        self.version2 = true;
-        self
-    }
-
-    pub fn dispatcher<E: Dispatcher>(self, dispatcher: E) -> Builder<E> {
+impl<D: Dispatcher, V> Builder<D, V>
+where
+    V: AmpVersion + Send,
+{
+    pub fn version2(self) -> Builder<D, V2> {
         Builder {
-            dispatcher,
-            version2: self.version2,
+            dispatcher: self.dispatcher,
+            version: PhantomData,
         }
     }
 
-    pub fn serve<R, W>(self, input: R, output: W) -> Handle
+    pub fn dispatcher<E: Dispatcher>(self, dispatcher: E) -> Builder<E, V> {
+        Builder {
+            dispatcher,
+            version: PhantomData,
+        }
+    }
+
+    pub fn serve<R, W>(self, input: R, output: W) -> Handle<V>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        serve(input, output, self.dispatcher, self.version2)
+        serve::<R, W, D, V>(input, output, self.dispatcher)
     }
 }
 
@@ -109,9 +115,9 @@ enum WriteCmd {
 }
 
 #[derive(Clone)]
-pub struct RequestSender(mpsc::Sender<WriteCmd>);
+pub struct RequestSender<V>(mpsc::Sender<WriteCmd>, PhantomData<V>);
 
-impl RequestSender {
+impl<V: AmpVersion> RequestSender<V> {
     pub async fn call_remote<Q: Serialize + Send + 'static, R: DeserializeOwned>(
         &mut self,
         command: String,
@@ -120,7 +126,7 @@ impl RequestSender {
         let (tx, rx) = oneshot::channel();
 
         let frame = FrameMaker(Box::new(move |tag| {
-            amp_serde::to_bytes(Request {
+            amp_serde::to_bytes::<V, _>(Request {
                 tag,
                 command,
                 fields: request,
@@ -133,8 +139,8 @@ impl RequestSender {
 
         // FIXME: do this without an intermediary copy when serde gets
         // good at deserializing untagged enums with flattened structs.
-        amp_serde::to_bytes(raw_frame)
-            .and_then(|b| amp_serde::from_bytes(&b))
+        amp_serde::to_bytes::<V, _>(raw_frame)
+            .and_then(amp_serde::from_bytes::<V, _, _>)
             .map_err(Into::into)
     }
 
@@ -144,7 +150,7 @@ impl RequestSender {
         request: Q,
     ) -> Result<(), Error> {
         let frame = FrameMaker(Box::new(move |tag| {
-            amp_serde::to_bytes(Request {
+            amp_serde::to_bytes::<V, _>(Request {
                 tag,
                 command,
                 fields: request,
@@ -157,15 +163,16 @@ impl RequestSender {
     }
 }
 
-pub struct Handle {
+pub struct Handle<V> {
     state: Arc<RwLock<LoopState>>,
     write_res: JoinHandle<Result<(), Error>>,
     read_res: JoinHandle<Result<(), Error>>,
     write_loop_handle: Option<mpsc::Sender<WriteCmd>>,
     shutdown: Option<oneshot::Sender<()>>,
+    version: PhantomData<V>,
 }
 
-impl Handle {
+impl<V> Handle<V> {
     pub fn shutdown(&mut self) {
         self.write_loop_handle = None;
         if let Some(s) = self.shutdown.take() {
@@ -184,8 +191,11 @@ impl Handle {
         Ok(())
     }
 
-    pub fn request_sender(&self) -> Option<RequestSender> {
-        self.write_loop_handle.as_ref().cloned().map(RequestSender)
+    pub fn request_sender(&self) -> Option<RequestSender<V>> {
+        self.write_loop_handle
+            .as_ref()
+            .cloned()
+            .map(|tx| RequestSender(tx, PhantomData))
     }
 
     pub fn state(&self) -> State {
@@ -204,11 +214,12 @@ impl Handle {
     }
 }
 
-fn serve<R, W, D>(input: R, output: W, dispatcher: D, version2: bool) -> Handle
+fn serve<R, W, D, V>(input: R, output: W, dispatcher: D) -> Handle<V>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
     D: Dispatcher,
+    V: AmpVersion + Send,
 {
     let state = Arc::new(RwLock::new(LoopState::default()));
     let (write_tx, write_rx) = mpsc::channel::<WriteCmd>(QUEUE_DEPTH);
@@ -218,16 +229,7 @@ where
     let read_state = state.clone();
     let write_tx2 = write_tx.clone();
     let read_res = tokio::spawn(async move {
-        let res = read_loop(
-            input,
-            shutdown_rx,
-            write_tx2,
-            dispatcher,
-            expect_rx,
-            version2,
-        )
-        .await;
-        eprintln!("read loop exit: {:?}", res);
+        let res = read_loop::<R, D, V>(input, shutdown_rx, write_tx2, dispatcher, expect_rx).await;
         read_state.write().unwrap().read_done = true;
         res
     });
@@ -235,7 +237,6 @@ where
     let write_state = state.clone();
     let write_res = tokio::spawn(async move {
         let res = write_loop(output, write_rx, expect_tx).await;
-        eprintln!("write loop exit: {:?}", res);
         write_state.write().unwrap().write_done = true;
         res
     });
@@ -246,28 +247,25 @@ where
         read_res,
         write_loop_handle: Some(write_tx),
         shutdown: Some(shutdown_tx),
+        version: PhantomData,
     }
 }
 
 type ReplyMap = HashMap<u64, oneshot::Sender<Response>>;
 
-async fn read_loop<R, D>(
+async fn read_loop<R, D, V: AmpVersion>(
     input: R,
     mut shutdown: oneshot::Receiver<()>,
     mut write_tx: mpsc::Sender<WriteCmd>,
     dispatcher: D,
     mut expect_rx: mpsc::Receiver<ExpectReply>,
-    version2: bool,
 ) -> Result<(), Error>
 where
     R: AsyncRead + Unpin,
     D: Dispatcher,
+    V: AmpVersion,
 {
-    let codec_in: Decoder<RawFrame> = if version2 {
-        Decoder::new_v2()
-    } else {
-        Decoder::new()
-    };
+    let codec_in = Decoder::<V, RawFrame>::new();
     let mut input = FramedRead::new(input, codec_in);
     let mut reply_map = ReplyMap::new();
     let mut dispatched_requests = FuturesUnordered::new();
@@ -276,7 +274,7 @@ where
         tokio::select! {
             frame = input.next() => {
                 if let Some(frame) = frame {
-                    if let Some(dr) = dispatch_frame(frame?, &mut reply_map, &mut write_tx, &dispatcher).await? {
+                    if let Some(dr) = dispatch_frame::<D, V>(frame?, &mut reply_map, &mut write_tx, &dispatcher).await? {
                         dispatched_requests.push(dr);
                     }
                 } else {
@@ -304,7 +302,7 @@ where
     Ok(())
 }
 
-async fn dispatch_frame<'a, D>(
+async fn dispatch_frame<'a, D, V>(
     frame: RawFrame,
     reply_map: &mut ReplyMap,
     write_tx: &mut mpsc::Sender<WriteCmd>,
@@ -312,6 +310,7 @@ async fn dispatch_frame<'a, D>(
 ) -> Result<Option<impl Future<Output = Result<(), Error>> + 'a>, Error>
 where
     D: Dispatcher,
+    V: AmpVersion,
 {
     match frame.try_into()? {
         Frame::Request {
@@ -334,8 +333,10 @@ where
                         .dispatch(std::str::from_utf8(&command)?, fields)
                         .await
                     {
-                        Ok(reply) => amp_serde::to_bytes(OkResponse { tag, fields: reply })?,
-                        Err(e) => amp_serde::to_bytes(ErrorResponse {
+                        Ok(reply) => {
+                            amp_serde::to_bytes::<V, _>(OkResponse { tag, fields: reply })?
+                        }
+                        Err(e) => amp_serde::to_bytes::<V, _>(ErrorResponse {
                             tag,
                             code: e.code,
                             description: e.description,
@@ -397,7 +398,8 @@ where
                     None
                 };
 
-                output.send(request.0(tag)?.into()).await?;
+                let out = request.0(tag)?.into();
+                output.send(out).await?;
             }
             WriteCmd::Exit => break,
         }
