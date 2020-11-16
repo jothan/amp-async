@@ -274,7 +274,7 @@ where
         tokio::select! {
             frame = input.next() => {
                 if let Some(frame) = frame {
-                    if let Some(dr) = dispatch_frame::<D, V>(frame?, &mut reply_map, &mut write_tx, &dispatcher).await? {
+                    if let Some(dr) = dispatch_frame::<D, V>(frame?, &mut reply_map, &mut write_tx, &dispatcher)? {
                         dispatched_requests.push(dr);
                     }
                 } else {
@@ -302,7 +302,7 @@ where
     Ok(())
 }
 
-async fn dispatch_frame<'a, D, V>(
+fn dispatch_frame<'a, D, V>(
     frame: RawFrame,
     reply_map: &mut ReplyMap,
     write_tx: &mut mpsc::Sender<WriteCmd>,
@@ -327,7 +327,7 @@ where
             }
             .left_future(),
             Some(tag) => {
-                let mut write_tx = write_tx.clone();
+                let write_tx = write_tx.clone();
                 async move {
                     let reply = match dispatcher
                         .dispatch(std::str::from_utf8(&command)?, fields)
@@ -365,7 +365,7 @@ where
 async fn write_loop<W>(
     output: W,
     mut input: mpsc::Receiver<WriteCmd>,
-    mut expect_tx: mpsc::Sender<ExpectReply>,
+    expect_tx: mpsc::Sender<ExpectReply>,
 ) -> Result<(), Error>
 where
     W: AsyncWrite + Unpin,
