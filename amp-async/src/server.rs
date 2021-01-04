@@ -12,7 +12,7 @@ use futures::stream::{FuturesUnordered, StreamExt, TryStreamExt};
 use futures::FutureExt;
 
 use async_trait::async_trait;
-use tokio::prelude::*;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
@@ -373,7 +373,7 @@ where
     let mut output = FramedWrite::new(output, BytesCodec::new());
     let mut seqno: u64 = 0;
 
-    while let Some(msg) = input.next().await {
+    while let Some(msg) = input.recv().await {
         match msg {
             WriteCmd::Reply(frame) => {
                 output.send(frame).await?;
